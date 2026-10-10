@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import threading
 import requests
 import speech_recognition as sr
 from pydub import AudioSegment
@@ -9,15 +10,16 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
+# כתובת ה-Web App של Google Sheets (או מתוך משתנה סביבה ברנדר)
 GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
 
+# מאגר מקומי בזיכרון (מאפשר מענה מיידי של 0ms לכל שיחה)
 cache_contacts = []
 cache_personal = []
-
-# זיכרון של מצב השיחה לכל מתקשר
 user_states = {}
 
 def sync_from_sheets():
+    """טעינת הנתונים מ-Google Sheets ברקע ללא חסימת השרת"""
     global cache_contacts, cache_personal
     try:
         res = requests.get(f"{GOOGLE_SCRIPT_URL}?action=getAll", timeout=15)
@@ -27,11 +29,12 @@ def sync_from_sheets():
             cache_personal = data.get("personal", [])
             print(f"Loaded {len(cache_contacts)} contacts.")
     except Exception as e:
-        print(f"Error syncing sheets: {e}")
+        print(f"Error loading sheets: {e}")
 
 @app.on_event("startup")
 def startup():
-    sync_from_sheets()
+    # הרצת הסנכרון בתהליכון נפרד כדי שהשרת יעלה ברגע אחד
+    threading.Thread(target=sync_from_sheets, daemon=True).start()
 
 @app.get("/refresh")
 def manual_refresh():
@@ -42,7 +45,7 @@ def post_to_sheets(payload: dict):
     try:
         requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error posting: {e}")
+        print(f"Error updating sheet: {e}")
 
 def get_state(phone: str):
     if phone not in user_states:
@@ -56,6 +59,7 @@ def get_state(phone: str):
     return user_states[phone]
 
 def transcribe_audio_from_url(audio_url: str) -> str:
+    """הורדת קובץ הקלטה מימות המשיח והמרה לטקסט דרך גוגל"""
     try:
         r = requests.get(audio_url, timeout=10)
         sound = AudioSegment.from_file(io.BytesIO(r.content))
@@ -73,16 +77,19 @@ def transcribe_audio_from_url(audio_url: str) -> str:
         print(f"Audio recognition error: {e}")
         return ""
 
-# ==================== הראוט הראשי ====================
+# ==================== ניתוב שיחה ראשי ====================
 
 @app.api_route("/", methods=["GET", "POST"])
 async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     params = dict(request.query_params)
     if request.method == "POST":
-        form_data = dict(await request.form())
-        params.update(form_data)
+        try:
+            form_data = dict(await request.form())
+            params.update(form_data)
+        except Exception:
+            pass
 
-    # אם זו קריאת ניתוק שיחה
+    # מענה שקט לקריאות ניתוק
     if params.get("hangup") == "yes":
         caller = params.get("ApiPhone", "")
         if caller in user_states:
@@ -93,7 +100,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     user = get_state(caller_phone)
     val = params.get("val", "").strip()
 
-    # 1. כניסה ראשונית לשיחה
+    # 1. כניסה ראשונית לשלוחה
     if not val and user["step"] == "main_menu":
         return PlainTextResponse(
             "read=t-שלום וברכה. לחיפוש בספר הטלפונים הקישו 1. לאזור אישי הקישו 2. לרישום מספר חדש הקישו 3. להשארת הודעה הקישו 4.=val,no,1,1,7,Digits,,"
@@ -107,14 +114,13 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2.=val,no,1,1,7,Digits,,"
             )
         elif val == "2":
-            user["step"] = "personal_check"
             # בדיקת קיום באיזור אישי
             matched = next((c for c in cache_contacts if c["phone"] == caller_phone), None)
             if not matched:
                 user["step"] = "main_menu"
                 return PlainTextResponse(
                     "id_list_message=t-מספר הטלפון אינו מופיע במאגר. ניתן להירשם בשלוחה 3.&"
-                    "read=t-לחיפוש בספר הטלפונים הקישו 1. לאזור אישי הקישו 2. לרישום הקישו 3. להודעה הקישו 4.=val,no,1,1,7,Digits,,"
+                    "read=t-לחיפוש הקישו 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
                 )
             user["user_name"] = matched["name"]
             user["step"] = "personal_menu"
@@ -130,7 +136,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             return PlainTextResponse("go_to_folder=/7/1")
         else:
             return PlainTextResponse(
-                "read=t-בחירה שגויה. לחיפוש הקישו 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
+                "read=t-בחירה שגויה. לחיפוש 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
             )
 
     # 3. שלוחה 1: חיפוש שם
@@ -138,7 +144,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         if val == "1":
             user["step"] = "search_voice_record"
             return PlainTextResponse(
-                "read=t-נא לומר את השם לחיפוש ולאחר מכן הקישו סולמית.=val,record,0,0,10,File,,"
+                "read=t-נא לומר את השם לחיפוש לאחר הצליל וסולמית לסיום.=val,record,0,0,10,File,,"
             )
         elif val == "2":
             user["step"] = "search_tap"
@@ -146,7 +152,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "read=t-נא להקליד את השם לחיפוש וסולמית לסיום.=val,no,1,15,7,HebrewTap,,"
             )
 
-    # עיבוד הקלטת חיפוש
     if user["step"] == "search_voice_record":
         record_url = val or params.get("ApiRecordPath", "")
         text = transcribe_audio_from_url(record_url)
@@ -174,7 +179,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if user["step"] == "search_tap":
         return do_search(val, user, mode="general")
 
-    # ניווט תוצאות (0 עד 6)
+    # ניווט בתוצאות
     if user["step"] == "browse_results":
         res = user["search_results"]
         idx = user["current_index"]
@@ -218,8 +223,8 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if user["step"] == "personal_menu":
         if val == "1":
             return PlainTextResponse(
-                f"id_list_message=t-שמך הוא {user.get('user_name')}, מספר הטלפון: {caller_phone}.&"
-                "read=t-לשמיעה 1. לשינוי 2. לאלפון 3.=val,no,1,1,7,Digits,,"
+                f"id_list_message=t-שמך הוא {user.get('user_name')}, ומספר הטלפון {caller_phone}.&"
+                "read=t-לשמיעה 1. לשינוי 2. לאלפון אישי 3.=val,no,1,1,7,Digits,,"
             )
         elif val == "2":
             user["step"] = "update_voice"
@@ -241,7 +246,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 get_menu_text(first["name"], first["phone"], "personal")
             )
 
-    # שינוי פרטים
     if user["step"] == "update_voice":
         record_url = val or params.get("ApiRecordPath", "")
         text = transcribe_audio_from_url(record_url)
@@ -271,7 +275,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         text = transcribe_audio_from_url(record_url)
         if not text:
             user["step"] = "register_voice"
-            return PlainTextResponse("read=t-השם לא נקלט. אמור את שמך וסולמית לסיום.=val,record,0,0,10,File,,")
+            return PlainTextResponse("read=t-השם לא נקלט. נא לומר את שמך וסולמית לסיום.=val,record,0,0,10,File,,")
         user["temp_name"] = text
         user["step"] = "confirm_register_name"
         return PlainTextResponse(f"read=t-אמרת {text}. לאישור 1, להקלטה חוזרת 2.=val,no,1,1,7,Digits,,")
@@ -282,7 +286,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             return PlainTextResponse("read=t-נא להקיש את מספר הטלפון וסולמית לסיום.=val,no,9,11,7,Digits,,")
         else:
             user["step"] = "register_voice"
-            return PlainTextResponse("read=t-אמור את שמך שוב וסולמית לסיום.=val,record,0,0,10,File,,")
+            return PlainTextResponse("read=t-נא לומר את שמך שוב וסולמית לסיום.=val,record,0,0,10,File,,")
 
     if user["step"] == "register_phone":
         new_phone = val
@@ -301,7 +305,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         "read=t-לחיפוש בספר הטלפונים הקישו 1. לאזור אישי הקישו 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
     )
 
-# עזרי השמעה
 def do_search(query: str, user: dict, mode: str = "general"):
     matches = [c for c in cache_contacts if query in c["name"]]
     if not matches:
