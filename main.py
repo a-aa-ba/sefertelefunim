@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-# משתני סביבה (מוגדרים ב-Render ב-Environment Variables)
+# משתני סביבה
 GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
 YEMOT_TOKEN = os.getenv("YEMOT_TOKEN", "093136451:112131")
 
@@ -105,26 +105,25 @@ def transcribe_audio(path_or_url: str) -> str:
         log_info(f"Audio recognition error: {e}")
         return ""
 
-# ==================== יצירת שלוחת ניתוביה וחיוג ====================
+# ==================== יצירת שלוחת ניתוביה ישירה וחיוג ====================
 
 def route_via_nitoviya(target_phone: str, caller_phone: str):
-    """
-    יוצר שלוחת ניתוביה מותאמת אישית למתקשר ללא שורות מיותרות
-    """
-    # 1. ניקוי המספר לספרות בלבד
+    # 1. ניקוי המספר ליעד (ספרות בלבד)
     clean_target = re.sub(r"\D", "", target_phone)
     if clean_target.startswith("972"):
         clean_target = "0" + clean_target[3:]
 
-    # 2. שלוחה מספרית תחת 99 לפי מספר המתקשר
+    # 2. שלוחה ישירה ברמה הראשית לפי מספר המתקשר (למשל: /0531234567)
     clean_caller = re.sub(r"\D", "", caller_phone)
-    unique_folder = f"99/{clean_caller}"
+    if not clean_caller:
+        clean_caller = "9999"
+    unique_folder = clean_caller
 
     # 3. בדיוק שתי השורות שדורש מודול ניתוביה עם ירידת שורה של ווינדוס (\r\n)
     ini_content = f"type=nitoviya\r\nnitoviya_dial_to={clean_target}\r\n"
 
     try:
-        log_info(f"מגדיר ניתוביה בשלוחה {unique_folder} עבור היעד {clean_target}...")
+        log_info(f"יוצר שלוחת ניתוביה ישירה /{unique_folder} עבור היעד {clean_target}...")
         url = "https://www.call2all.co.il/ym/api/UploadFile"
         files = {
             'file': ('ext.ini', io.BytesIO(ini_content.encode('utf-8')), 'text/plain')
@@ -135,14 +134,14 @@ def route_via_nitoviya(target_phone: str, caller_phone: str):
             'convertAudio': '0'
         }
         res = requests.post(url, params=params, files=files, timeout=10)
-        log_info(f"תשובת ימות המשיח: {res.text}")
+        log_info(f"תשובת ימות המשיח ביצירת שלוחה: {res.text}")
     except Exception as e:
-        log_info(f"שגיאה בהגדרת ניתוביה: {e}")
+        log_info(f"שגיאה ביצירת שלוחת ניתוביה: {e}")
 
-    # העברת המשתמש לשלוחה
+    # העברת המשתמש ישירות לשלוחה שנוצרה
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# תבניות מקשים והקלטות ללא אישורים כפולים
+# תבניות מקשים ללא אישורים כפולים
 MENU_KEY_PARAMS = "val,no,1,1,7,NO,,,,,,,,no"
 PHONE_KEY_PARAMS = "val,no,9,11,7,NO,,,,,,,,no"
 HEBREW_KEY_PARAMS = "val,no,1,15,7,HebrewKeyboard,,,,,,,,no"
@@ -262,7 +261,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(f"read=t-לחיפוש קולי 1, להקלדה 2={MENU_KEY_PARAMS}")
         elif val == "4":
-            # ניתוב דרך מודול nitoviya
+            # ניתוב ישיר דרך שלוחת nitoviya שנפתחת בשורש
             return route_via_nitoviya(c_phone, caller_phone)
         elif val == "5":
             if user["mode"] == "general":
