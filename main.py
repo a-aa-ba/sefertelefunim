@@ -9,13 +9,13 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-# כתובת ה-Web App של Google Sheets
-GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/execהדבק_כאן_את_הקישור_מגוגל_סקריפט")
+GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
 
-# מטמון בזיכרון מהיר
 cache_contacts = []
 cache_personal = []
-sessions = {}
+
+# זיכרון של מצב השיחה לכל מתקשר
+user_states = {}
 
 def sync_from_sheets():
     global cache_contacts, cache_personal
@@ -25,9 +25,9 @@ def sync_from_sheets():
             data = res.json()
             cache_contacts = data.get("contacts", [])
             cache_personal = data.get("personal", [])
-            print(f"Loaded {len(cache_contacts)} contacts and {len(cache_personal)} personal items.")
+            print(f"Loaded {len(cache_contacts)} contacts.")
     except Exception as e:
-        print(f"Error syncing from Google Sheets: {e}")
+        print(f"Error syncing sheets: {e}")
 
 @app.on_event("startup")
 def startup():
@@ -42,17 +42,18 @@ def post_to_sheets(payload: dict):
     try:
         requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error posting to sheet: {e}")
+        print(f"Error posting: {e}")
 
-def get_session(phone: str):
-    if phone not in sessions:
-        sessions[phone] = {
+def get_state(phone: str):
+    if phone not in user_states:
+        user_states[phone] = {
+            "step": "main_menu",
             "search_results": [],
             "current_index": 0,
             "temp_name": "",
             "mode": "general"
         }
-    return sessions[phone]
+    return user_states[phone]
 
 def transcribe_audio_from_url(audio_url: str) -> str:
     try:
@@ -72,244 +73,259 @@ def transcribe_audio_from_url(audio_url: str) -> str:
         print(f"Audio recognition error: {e}")
         return ""
 
-# ==================== הנתיב הראשי: מאזין ישירות לכתובת הבסיס ====================
+# ==================== הראוט הראשי ====================
 
 @app.api_route("/", methods=["GET", "POST"])
-async def root_endpoint(request: Request, background_tasks: BackgroundTasks):
+async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
+    params = dict(request.query_params)
     if request.method == "POST":
-        params = dict(await request.form())
-    else:
-        params = dict(request.query_params)
+        form_data = dict(await request.form())
+        params.update(form_data)
 
-    # מענה שקט בעת ניתוק שיחה (מונע שגיאות ביומן)
+    # אם זו קריאת ניתוק שיחה
     if params.get("hangup") == "yes":
+        caller = params.get("ApiPhone", "")
+        if caller in user_states:
+            del user_states[caller]
         return PlainTextResponse("ok")
 
-    caller_phone = params.get("ApiPhone", "")
-    action = params.get("action", "main_menu")
-    val = params.get("val", "")
-    sess = get_session(caller_phone)
+    caller_phone = params.get("ApiPhone", "000")
+    user = get_state(caller_phone)
+    val = params.get("val", "").strip()
 
-    # ------------------ תפריט ראשי ------------------
-    if action == "main_menu":
-        if not val:
-            return PlainTextResponse(
-                "read=t-שלום וברכה. לחיפוש בספר הטלפונים הקישו 1. "
-                "לאזור אישי הקישו 2. "
-                "לרישום מספר חדש הקישו 3. "
-                "להשארת הודעה למנהל הקישו 4.=val,no,1,1,7,Digits,,&action=main_menu"
-            )
+    # 1. כניסה ראשונית לשיחה
+    if not val and user["step"] == "main_menu":
+        return PlainTextResponse(
+            "read=t-שלום וברכה. לחיפוש בספר הטלפונים הקישו 1. לאזור אישי הקישו 2. לרישום מספר חדש הקישו 3. להשארת הודעה הקישו 4.=val,no,1,1,7,Digits,,"
+        )
+
+    # 2. בחירה בתפריט הראשי
+    if user["step"] == "main_menu":
         if val == "1":
-            return PlainTextResponse("id_list_message=&action=menu_search")
+            user["step"] = "menu_search"
+            return PlainTextResponse(
+                "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2.=val,no,1,1,7,Digits,,"
+            )
         elif val == "2":
-            return PlainTextResponse("id_list_message=&action=personal_zone_check")
+            user["step"] = "personal_check"
+            # בדיקת קיום באיזור אישי
+            matched = next((c for c in cache_contacts if c["phone"] == caller_phone), None)
+            if not matched:
+                user["step"] = "main_menu"
+                return PlainTextResponse(
+                    "id_list_message=t-מספר הטלפון אינו מופיע במאגר. ניתן להירשם בשלוחה 3.&"
+                    "read=t-לחיפוש בספר הטלפונים הקישו 1. לאזור אישי הקישו 2. לרישום הקישו 3. להודעה הקישו 4.=val,no,1,1,7,Digits,,"
+                )
+            user["user_name"] = matched["name"]
+            user["step"] = "personal_menu"
+            return PlainTextResponse(
+                "read=t-שלום. לשמיעת הפרטים האישיים הקישו 1. לשינוי הפרטים הקישו 2. לאלפון אישי הקישו 3.=val,no,1,1,7,Digits,,"
+            )
         elif val == "3":
-            return PlainTextResponse("id_list_message=&action=register_start")
+            user["step"] = "register_voice"
+            return PlainTextResponse(
+                "read=t-נא לומר את שמך לאחר הצליל ולסיום הקישו סולמית.=val,record,0,0,10,File,,"
+            )
         elif val == "4":
             return PlainTextResponse("go_to_folder=/7/1")
         else:
-            return PlainTextResponse("id_list_message=t-בחירה שגויה&action=main_menu")
-
-    # ------------------ שלוחה 1: חיפוש שם ------------------
-    if action == "menu_search":
-        if not val:
             return PlainTextResponse(
-                "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2.=val,no,1,1,7,Digits,,&action=menu_search"
+                "read=t-בחירה שגויה. לחיפוש הקישו 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
             )
+
+    # 3. שלוחה 1: חיפוש שם
+    if user["step"] == "menu_search":
         if val == "1":
+            user["step"] = "search_voice_record"
             return PlainTextResponse(
-                "read=t-נא לומר את השם לחיפוש לאחר הצליל ולסיום הקישו סולמית.=val,record,0,0,10,File,,&action=search_voice_record"
+                "read=t-נא לומר את השם לחיפוש ולאחר מכן הקישו סולמית.=val,record,0,0,10,File,,"
             )
         elif val == "2":
+            user["step"] = "search_tap"
             return PlainTextResponse(
-                "read=t-נא להקליד את השם לחיפוש וסולמית לסיום.=val,no,1,15,7,HebrewTap,,&action=search_tap_process"
+                "read=t-נא להקליד את השם לחיפוש וסולמית לסיום.=val,no,1,15,7,HebrewTap,,"
             )
 
-    if action == "search_voice_record":
-        record_url = params.get("val") or params.get("ApiRecordPath") or ""
+    # עיבוד הקלטת חיפוש
+    if user["step"] == "search_voice_record":
+        record_url = val or params.get("ApiRecordPath", "")
         text = transcribe_audio_from_url(record_url)
         if not text:
-            return PlainTextResponse("id_list_message=t-השם לא נקלט.&action=menu_search")
-        sess["temp_name"] = text
+            user["step"] = "menu_search"
+            return PlainTextResponse(
+                "id_list_message=t-השם לא נקלט.&"
+                "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2.=val,no,1,1,7,Digits,,"
+            )
+        user["temp_name"] = text
+        user["step"] = "confirm_voice_search"
         return PlainTextResponse(
-            f"read=t-חיפשת את: {text}. לאישור הקישו 1, להקלטה חוזרת 2.=val,no,1,1,7,Digits,,&action=search_voice_confirm"
+            f"read=t-חיפשת את {text}. לאישור הקישו 1, להקלטה חוזרת 2.=val,no,1,1,7,Digits,,"
         )
 
-    if action == "search_voice_confirm":
+    if user["step"] == "confirm_voice_search":
         if val == "1":
-            return execute_search(sess["temp_name"], caller_phone, mode="general")
+            return do_search(user["temp_name"], user, mode="general")
         else:
-            return PlainTextResponse("id_list_message=&action=menu_search&val=1")
+            user["step"] = "search_voice_record"
+            return PlainTextResponse(
+                "read=t-נא לומר את השם לחיפוש שוב וסולמית לסיום.=val,record,0,0,10,File,,"
+            )
 
-    if action == "search_tap_process":
-        return execute_search(val, caller_phone, mode="general")
+    if user["step"] == "search_tap":
+        return do_search(val, user, mode="general")
 
-    # ------------------ ניווט תוצאות ------------------
-    if action == "browse_results":
-        results = sess["search_results"]
-        idx = sess["current_index"]
-
-        if not results or idx < 0 or idx >= len(results):
-            return PlainTextResponse("id_list_message=t-חזרה לתפריט ראשי.&action=main_menu")
-
-        contact = results[idx]
-        name, phone = contact["name"], contact["phone"]
+    # ניווט תוצאות (0 עד 6)
+    if user["step"] == "browse_results":
+        res = user["search_results"]
+        idx = user["current_index"]
+        c = res[idx]
 
         if val == "0":
-            return play_contact_menu(name, phone, sess["mode"])
+            return play_contact(c["name"], c["phone"], user["mode"])
         elif val == "1":
-            if idx + 1 < len(results):
-                sess["current_index"] += 1
-            else:
-                return PlainTextResponse("id_list_message=t-הגעת לסוף התוצאות.&action=browse_results&val=0")
-            nxt = results[sess["current_index"]]
-            return play_contact_menu(nxt["name"], nxt["phone"], sess["mode"])
+            if idx + 1 < len(res):
+                user["current_index"] += 1
+            nxt = res[user["current_index"]]
+            return play_contact(nxt["name"], nxt["phone"], user["mode"])
         elif val == "2":
             if idx - 1 >= 0:
-                sess["current_index"] -= 1
-            else:
-                return PlainTextResponse("id_list_message=t-הגעת לתוצאה הראשונה.&action=browse_results&val=0")
-            prv = results[sess["current_index"]]
-            return play_contact_menu(prv["name"], prv["phone"], sess["mode"])
+                user["current_index"] -= 1
+            prv = res[user["current_index"]]
+            return play_contact(prv["name"], prv["phone"], user["mode"])
         elif val == "3":
-            return PlainTextResponse("id_list_message=&action=menu_search")
+            user["step"] = "menu_search"
+            return PlainTextResponse("read=t-לחיפוש קולי 1, להקלדה 2.=val,no,1,1,7,Digits,,")
         elif val == "4":
-            return PlainTextResponse(f"routing={phone}")
+            return PlainTextResponse(f"routing={c['phone']}")
         elif val == "5":
-            if sess["mode"] == "general":
-                cache_personal.append({"owner": caller_phone, "name": name, "phone": phone})
+            if user["mode"] == "general":
+                cache_personal.append({"owner": caller_phone, "name": c["name"], "phone": c["phone"]})
                 background_tasks.add_task(
                     post_to_sheets,
-                    {"action": "addPersonal", "owner": caller_phone, "name": name, "phone": phone}
+                    {"action": "addPersonal", "owner": caller_phone, "name": c["name"], "phone": c["phone"]}
                 )
-                return PlainTextResponse("id_list_message=t-המספר נשמר באלפון האישי בהצלחה.&action=browse_results&val=0")
-            else:
-                return play_contact_menu(name, phone, sess["mode"])
+                return PlainTextResponse(
+                    "id_list_message=t-המספר נשמר באלפון האישי בהצלחה.&" +
+                    get_menu_text(c["name"], c["phone"], user["mode"])
+                )
         elif val == "6":
-            return PlainTextResponse("id_list_message=&action=main_menu")
-        else:
-            return play_contact_menu(name, phone, sess["mode"])
-
-    # ------------------ שלוחה 2: אזור אישי ------------------
-    if action == "personal_zone_check":
-        matched = next((c for c in cache_contacts if c["phone"] == caller_phone), None)
-        if not matched:
+            user["step"] = "main_menu"
             return PlainTextResponse(
-                "id_list_message=t-מספר הטלפון אינו מופיע במאגר. ניתן להירשם בשלוחה 3.&action=main_menu"
+                "read=t-לחיפוש הקישו 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
             )
 
-        sess["user_name"] = matched["name"]
-        return PlainTextResponse(
-            "read=t-שלום. לשמיעת הפרטים האישיים הקישו 1. "
-            "לשינוי הפרטים הקישו 2. "
-            "לאלפון אישי הקישו 3.=val,no,1,1,7,Digits,,&action=personal_zone_menu"
-        )
-
-    if action == "personal_zone_menu":
+    # 4. שלוחה 2: אזור אישי
+    if user["step"] == "personal_menu":
         if val == "1":
-            u_name = sess.get("user_name", "")
             return PlainTextResponse(
-                f"id_list_message=t-שמך במערכת הוא: {u_name}. ומספר הטלפון הוא: {caller_phone}.&action=personal_zone_check"
+                f"id_list_message=t-שמך הוא {user.get('user_name')}, מספר הטלפון: {caller_phone}.&"
+                "read=t-לשמיעה 1. לשינוי 2. לאלפון 3.=val,no,1,1,7,Digits,,"
             )
         elif val == "2":
-            sess["update_mode"] = True
-            return PlainTextResponse("id_list_message=&action=register_start")
+            user["step"] = "update_voice"
+            return PlainTextResponse("read=t-נא לומר את שמך המעודכן וסולמית לסיום.=val,record,0,0,10,File,,")
         elif val == "3":
-            p_list = [c for c in cache_personal if c["owner"] == caller_phone]
+            p_list = [x for x in cache_personal if x["owner"] == caller_phone]
             if not p_list:
-                return PlainTextResponse("id_list_message=t-האלפון האישי שלך ריק.&action=personal_zone_check")
-
-            sess["search_results"] = p_list
-            sess["current_index"] = 0
-            sess["mode"] = "personal"
-            first = p_list[0]
-            msg = f"id_list_message=t-נמצאו {len(p_list)} אנשי קשר באלפון האישי.&"
-            return PlainTextResponse(msg + get_contact_read_string(first["name"], first["phone"], mode="personal"))
-
-    # ------------------ שלוחה 3: רישום / שינוי פרטים ------------------
-    if action == "register_start":
-        return PlainTextResponse(
-            "read=t-נא לומר את שמך המלא לאחר הצליל ולסיום הקישו סולמית.=val,record,0,0,10,File,,&action=register_voice_name"
-        )
-
-    if action == "register_voice_name":
-        record_url = params.get("val") or params.get("ApiRecordPath") or ""
-        text = transcribe_audio_from_url(record_url)
-        if not text:
-            return PlainTextResponse("id_list_message=t-השם לא נקלט. נסה שוב.&action=register_start")
-        sess["temp_name"] = text
-        return PlainTextResponse(
-            f"read=t-אמרת: {text}. לאישור הקישו 1, להקלטה חוזרת 2.=val,no,1,1,7,Digits,,&action=register_confirm_name"
-        )
-
-    if action == "register_confirm_name":
-        if val == "1":
-            if sess.get("update_mode"):
-                new_name = sess.get("temp_name")
-                sess["update_mode"] = False
-                for c in cache_contacts:
-                    if c["phone"] == caller_phone:
-                        c["name"] = new_name
-                        break
-                background_tasks.add_task(
-                    post_to_sheets,
-                    {"action": "update", "name": new_name, "phone": caller_phone}
+                return PlainTextResponse(
+                    "id_list_message=t-האלפון האישי שלך ריק.&"
+                    "read=t-לשמיעה 1. לשינוי 2. לאלפון 3.=val,no,1,1,7,Digits,,"
                 )
-                return PlainTextResponse(f"id_list_message=t-הפרטים עודכנו בהצלחה. השם החדש: {new_name}.&action=main_menu")
-
+            user["search_results"] = p_list
+            user["current_index"] = 0
+            user["mode"] = "personal"
+            user["step"] = "browse_results"
+            first = p_list[0]
             return PlainTextResponse(
-                "read=t-נא להקיש את מספר הטלפון וסולמית לסיום.=val,no,9,11,7,Digits,,&action=register_phone"
+                f"id_list_message=t-נמצאו {len(p_list)} אנשי קשר.&" +
+                get_menu_text(first["name"], first["phone"], "personal")
+            )
+
+    # שינוי פרטים
+    if user["step"] == "update_voice":
+        record_url = val or params.get("ApiRecordPath", "")
+        text = transcribe_audio_from_url(record_url)
+        user["temp_name"] = text
+        user["step"] = "confirm_update"
+        return PlainTextResponse(f"read=t-אמרת {text}. לאישור 1, להקלטה חוזרת 2.=val,no,1,1,7,Digits,,")
+
+    if user["step"] == "confirm_update":
+        if val == "1":
+            new_name = user["temp_name"]
+            for c in cache_contacts:
+                if c["phone"] == caller_phone:
+                    c["name"] = new_name
+            background_tasks.add_task(post_to_sheets, {"action": "update", "name": new_name, "phone": caller_phone})
+            user["step"] = "main_menu"
+            return PlainTextResponse(
+                f"id_list_message=t-שמך עודכן בהצלחה ל-{new_name}.&"
+                "read=t-לחיפוש הקישו 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
             )
         else:
-            return PlainTextResponse("id_list_message=&action=register_start")
+            user["step"] = "update_voice"
+            return PlainTextResponse("read=t-נא לומר את שמך שוב וסולמית לסיום.=val,record,0,0,10,File,,")
 
-    if action == "register_phone":
-        new_phone = val.strip()
-        new_name = sess.get("temp_name")
-        if len(new_phone) < 9:
-            return PlainTextResponse("id_list_message=t-מספר טלפון שגוי.&action=register_phone")
+    # 5. שלוחה 3: רישום חדש
+    if user["step"] == "register_voice":
+        record_url = val or params.get("ApiRecordPath", "")
+        text = transcribe_audio_from_url(record_url)
+        if not text:
+            user["step"] = "register_voice"
+            return PlainTextResponse("read=t-השם לא נקלט. אמור את שמך וסולמית לסיום.=val,record,0,0,10,File,,")
+        user["temp_name"] = text
+        user["step"] = "confirm_register_name"
+        return PlainTextResponse(f"read=t-אמרת {text}. לאישור 1, להקלטה חוזרת 2.=val,no,1,1,7,Digits,,")
 
+    if user["step"] == "confirm_register_name":
+        if val == "1":
+            user["step"] = "register_phone"
+            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון וסולמית לסיום.=val,no,9,11,7,Digits,,")
+        else:
+            user["step"] = "register_voice"
+            return PlainTextResponse("read=t-אמור את שמך שוב וסולמית לסיום.=val,record,0,0,10,File,,")
+
+    if user["step"] == "register_phone":
+        new_phone = val
+        new_name = user["temp_name"]
         cache_contacts.append({"name": new_name, "phone": new_phone})
-        background_tasks.add_task(
-            post_to_sheets,
-            {"action": "register", "name": new_name, "phone": new_phone}
-        )
-
+        background_tasks.add_task(post_to_sheets, {"action": "register", "name": new_name, "phone": new_phone})
+        user["step"] = "main_menu"
         return PlainTextResponse(
-            f"id_list_message=t-נרשמת בהצלחה! השם: {new_name}, מספר: {new_phone}.&action=main_menu"
+            f"id_list_message=t-נרשמת בהצלחה! השם {new_name}, מספר {new_phone}.&"
+            "read=t-לחיפוש הקישו 1. לאזור אישי 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
         )
 
-    return PlainTextResponse("id_list_message=t-שגיאה בניתוב&action=main_menu")
+    # ברירת מחדל
+    user["step"] = "main_menu"
+    return PlainTextResponse(
+        "read=t-לחיפוש בספר הטלפונים הקישו 1. לאזור אישי הקישו 2. לרישום 3. להודעה 4.=val,no,1,1,7,Digits,,"
+    )
 
-
-def execute_search(query: str, caller_phone: str, mode: str = "general"):
+# עזרי השמעה
+def do_search(query: str, user: dict, mode: str = "general"):
     matches = [c for c in cache_contacts if query in c["name"]]
     if not matches:
-        return PlainTextResponse("id_list_message=t-לא נמצאו תוצאות לשם המבוקש.&action=menu_search")
-
-    sess = get_session(caller_phone)
-    sess["search_results"] = matches
-    sess["current_index"] = 0
-    sess["mode"] = mode
-
+        user["step"] = "menu_search"
+        return PlainTextResponse(
+            "id_list_message=t-לא נמצאו תוצאות לשם המבוקש.&"
+            "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2.=val,no,1,1,7,Digits,,"
+        )
+    user["search_results"] = matches
+    user["current_index"] = 0
+    user["mode"] = mode
+    user["step"] = "browse_results"
     first = matches[0]
-    msg = f"id_list_message=t-נמצאו {len(matches)} תוצאות.&"
-    return PlainTextResponse(msg + get_contact_read_string(first["name"], first["phone"], mode=mode))
+    return PlainTextResponse(
+        f"id_list_message=t-נמצאו {len(matches)} תוצאות.&" +
+        get_menu_text(first["name"], first["phone"], mode)
+    )
 
-def get_contact_read_string(name: str, phone: str, mode: str = "general") -> str:
+def get_menu_text(name: str, phone: str, mode: str = "general"):
     if mode == "general":
-        menu = (
-            f"t-תוצאה: {name}. מספר טלפון: {phone}. "
-            "לשמיעה חוזרת 0. לתוצאה הבאה 1. לתוצאה קודמת 2. "
-            "לחיפוש חדש 3. לחיוג 4. לשמירה באלפון האישי 5. ליציאה 6."
-        )
+        t = f"t-תוצאה: {name}. טלפון: {phone}. לשמיעה חוזרת 0. לתוצאה הבאה 1. לקודמת 2. לחיפוש חדש 3. לחיוג 4. לשמירה באלפון 5. ליציאה 6."
     else:
-        menu = (
-            f"t-איש קשר: {name}. מספר טלפון: {phone}. "
-            "לשמיעה חוזרת 0. לאיש הקשר הבא 1. לקודם 2. "
-            "לחיפוש חדש 3. לחיוג 4. ליציאה 6."
-        )
-    return f"read={menu}=val,no,1,1,7,Digits,,&action=browse_results"
+        t = f"t-איש קשר: {name}. טלפון: {phone}. לשמיעה חוזרת 0. לאיש קשר הבא 1. לקודם 2. לחיפוש חדש 3. לחיוג 4. ליציאה 6."
+    return f"read={t}=val,no,1,1,7,Digits,,"
 
-def play_contact_menu(name: str, phone: str, mode: str = "general"):
-    return PlainTextResponse(get_contact_read_string(name, phone, mode=mode))
+def play_contact(name: str, phone: str, mode: str = "general"):
+    return PlainTextResponse(get_menu_text(name, phone, mode))
