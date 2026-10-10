@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-# כתובת ה-Web App של Google Sheets (או מתוך משתנה סביבה ברנדר)
+# כתובת ה-Web App של Google Sheets (דרך משתנה סביבה או ישירות כאן)
 GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
 
 # מאגר מקומי בזיכרון (מאפשר מענה מיידי של 0ms לכל שיחה)
@@ -27,13 +27,13 @@ def sync_from_sheets():
             data = res.json()
             cache_contacts = data.get("contacts", [])
             cache_personal = data.get("personal", [])
-            print(f"Loaded {len(cache_contacts)} contacts.")
+            print(f"Loaded {len(cache_contacts)} contacts and {len(cache_personal)} personal items.")
     except Exception as e:
         print(f"Error loading sheets: {e}")
 
 @app.on_event("startup")
 def startup():
-    # הרצת הסנכרון בתהליכון נפרד כדי שהשרת יעלה ברגע אחד
+    # הרצת הסנכרון בתהליכון נפרד כדי שהשרת יעלה מיידית
     threading.Thread(target=sync_from_sheets, daemon=True).start()
 
 @app.get("/refresh")
@@ -79,8 +79,12 @@ def transcribe_audio_from_url(audio_url: str) -> str:
 
 # ==================== ניתוב שיחה ראשי ====================
 
-@app.api_route("/", methods=["GET", "POST"])
+@app.api_route("/", methods=["GET", "POST", "HEAD"])
 async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
+    # מענה לבדיקות תקינות של Render ושרתי הטלפוניה (מונע 405 Method Not Allowed)
+    if request.method == "HEAD":
+        return PlainTextResponse("ok")
+
     params = dict(request.query_params)
     if request.method == "POST":
         try:
@@ -179,7 +183,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if user["step"] == "search_tap":
         return do_search(val, user, mode="general")
 
-    # ניווט בתוצאות
+    # ניווט בתוצאות (0 עד 6)
     if user["step"] == "browse_results":
         res = user["search_results"]
         idx = user["current_index"]
