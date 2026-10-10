@@ -10,9 +10,8 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-# משתני סביבה (ניתן להגדיר ב-Render ב-Environment Variables)
+# משתני סביבה
 GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
-# טוקן ימות המשיח להורדת קבצי הקלטה: מספר מערכת נקודתיים סיסמה (למשל: 0770000000:123456)
 YEMOT_TOKEN = os.getenv("YEMOT_TOKEN", "093136451:112131")
 
 cache_contacts = []
@@ -36,11 +35,9 @@ def sync_from_sheets():
             data = res.json()
             cache_contacts = data.get("contacts", [])
             cache_personal = data.get("personal", [])
-            log_info(f"סנכרון הצליח: נטענו {len(cache_contacts)} אנשי קשר כלליים ו-{len(cache_personal)} באלפון אישי.")
-        else:
-            log_info(f"שגיאה בסנכרון sheets: קוד {res.status_code}")
+            log_info(f"סנכרון הצליח: נטענו {len(cache_contacts)} אנשי קשר.")
     except Exception as e:
-        log_info(f"שגיאה בחיבור ל-Google Sheets: {e}")
+        log_info(f"שגיאה בסנכרון sheets: {e}")
 
 @app.on_event("startup")
 def startup():
@@ -69,26 +66,23 @@ def get_state(phone: str):
         }
     return user_states[phone]
 
+# ==================== טיפול בהורדה וזיהוי קולי ====================
+
 def download_audio_from_yemot(path_or_url: str) -> bytes:
-    """הורדת קובץ ההקלטה מימות המשיח באמצעות ה-API"""
     clean_path = path_or_url.strip()
-    
-    # אם זה כבר URL מלא
     if clean_path.startswith("http://") or clean_path.startswith("https://"):
         download_url = clean_path
     else:
-        # נתיב יחסי מימות המשיח (למשל: 9/000.wav)
         file_path = clean_path.lstrip("/")
         download_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={YEMOT_TOKEN}&path=ivr2:/{file_path}"
     
     log_info(f"מוריד קובץ שמע מכתובת: {download_url}")
     r = requests.get(download_url, timeout=15)
     if r.status_code != 200:
-        raise Exception(f"Failed to download audio file (Status: {r.status_code}). ודא ש-YEMOT_TOKEN מוגדר נכון.")
+        raise Exception(f"Failed to download audio file (Status: {r.status_code})")
     return r.content
 
 def transcribe_audio(path_or_url: str) -> str:
-    """המרת קובץ ההקלטה לטקסט דרך גוגל"""
     try:
         audio_bytes = download_audio_from_yemot(path_or_url)
         sound = AudioSegment.from_file(io.BytesIO(audio_bytes))
@@ -107,12 +101,42 @@ def transcribe_audio(path_or_url: str) -> str:
         log_info(f"Audio recognition error: {e}")
         return ""
 
-# תבנית הקשה ללא השמעה חוזרת וללא בקשת אישור
-# 1:val, 2:no, 3:max, 4:min, 5:sec, 6:NO, 7-14:ריק, 15:no (ביטול אישור)
+# ==================== יצירת שלוחה וירטואלית עבור ניתוביה ====================
+
+def route_via_nitoviya(target_phone: str, caller_phone: str, call_id: str):
+    """
+    יוצר שלוחה ייעודית למתקשר עם הגדרות nitoviya ומעביר אותו אליה
+    בצורה הזו מספר מתקשרים במקביל אינם מתנגשים
+    """
+    # מזהה ייחודי לתיקייה (לפי טלפון או מזהה שיחה)
+    unique_folder = f"routing/{caller_phone}"
+    
+    # הגדרות השלוחה המבוקשות
+    ini_content = f"type=nitoviya\nnitoviya_dial_to={target_phone}\n"
+    
+    try:
+        log_info(f"מגדיר שלוחת ניתוביה בשלוחה {unique_folder} עבור היעד {target_phone}...")
+        url = f"https://www.call2all.co.il/ym/api/UploadFile"
+        files = {
+            'file': ('ext.ini', io.BytesIO(ini_content.encode('utf-8')), 'text/plain')
+        }
+        params = {
+            'token': YEMOT_TOKEN,
+            'path': f"ivr2:/{unique_folder}/ext.ini",
+            'convertAudio': '0'
+        }
+        res = requests.post(url, params=params, files=files, timeout=10)
+        log_info(f"תשובת עדכון שלוחה מימות המשיח: {res.text}")
+    except Exception as e:
+        log_info(f"שגיאה בהגדרת שלוחת ניתוביה: {e}")
+
+    # העברת המשתמש לשלוחה שנוצרה
+    return PlainTextResponse(f"go_to_folder=/{unique_folder}")
+
+# הגדרות מקשים נקיות ללא אישורים
 MENU_KEY_PARAMS = "val,no,1,1,7,NO,,,,,,,,no"
 PHONE_KEY_PARAMS = "val,no,9,11,7,NO,,,,,,,,no"
 HEBREW_KEY_PARAMS = "val,no,1,15,7,HebrewKeyboard,,,,,,,,no"
-# תבנית הקלטה ללא תפריט אישור בסיום (ערך 6 מוגדר no)
 RECORD_PARAMS = "val,,record,,,no"
 
 # ==================== ניתוב שיחה ראשי ====================
@@ -131,25 +155,24 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             pass
 
     caller_phone = params.get("ApiPhone", "000")
+    call_id = params.get("ApiCallId", "0")
     val = params.get("val", "").strip()
     hangup = params.get("hangup", "")
 
-    log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערך שהתקבל: '{val}' | ניתוק: '{hangup}' | פרמטרים נוספים: {list(params.keys())}")
+    log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערך: '{val}' | שלב: {get_state(caller_phone)['step']}")
 
     if hangup == "yes":
         if caller_phone in user_states:
             del user_states[caller_phone]
-        log_info(f"השיחה נותקה על ידי {caller_phone}")
         return PlainTextResponse("ok")
 
     user = get_state(caller_phone)
-    log_info(f"מצב שיחה נוכחי של {caller_phone}: {user['step']}")
 
     # 1. תפריט ראשי
     if not val and user["step"] == "main_menu":
-        resp = f"read=t-שלום וברכה, לחיפוש בספר הטלפונים הקישו 1, לאזור אישי הקישו 2, לרישום מספר חדש הקישו 3, להשארת הודעה הקישו 4={MENU_KEY_PARAMS}"
-        log_info(f"תשובה לטלפון: תפריט ראשי")
-        return PlainTextResponse(resp)
+        return PlainTextResponse(
+            f"read=t-שלום וברכה, לחיפוש בספר הטלפונים הקישו 1, לאזור אישי הקישו 2, לרישום מספר חדש הקישו 3, להשארת הודעה הקישו 4={MENU_KEY_PARAMS}"
+        )
 
     # 2. ניתוב מהתפריט הראשי
     if user["step"] == "main_menu":
@@ -231,7 +254,8 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(f"read=t-לחיפוש קולי 1, להקלדה 2={MENU_KEY_PARAMS}")
         elif val == "4":
-            return PlainTextResponse(f"routing={c_phone}")
+            # ניתוב דרך שלוחת nitoviya ייעודית למתקשר
+            return route_via_nitoviya(c_phone, caller_phone, call_id)
         elif val == "5":
             if user["mode"] == "general":
                 cache_personal.append({"owner": caller_phone, "name": c_name, "phone": c_phone})
