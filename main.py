@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 app = FastAPI()
 
 # קישור ה-Web App של Google Sheets
-GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec")
+GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
 
 cache_contacts = []
 cache_personal = []
