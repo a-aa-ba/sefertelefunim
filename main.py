@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import json
 import threading
 import requests
@@ -10,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-# משתני סביבה
+# משתני סביבה (מוגדרים ב-Render ב-Environment Variables)
 GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
 YEMOT_TOKEN = os.getenv("YEMOT_TOKEN", "093136451:112131")
 
@@ -22,6 +23,7 @@ def log_info(msg: str):
     print(f"[IVR-LOG] {msg}", flush=True)
 
 def clean_yemot_text(text: str) -> str:
+    """הסרת נקודות ומקפים למניעת שגיאות פענוח בימות המשיח"""
     if not text:
         return ""
     return text.replace(".", " ").replace("-", " ").strip()
@@ -36,8 +38,10 @@ def sync_from_sheets():
             cache_contacts = data.get("contacts", [])
             cache_personal = data.get("personal", [])
             log_info(f"סנכרון הצליח: נטענו {len(cache_contacts)} אנשי קשר.")
+        else:
+            log_info(f"שגיאה בסנכרון sheets: קוד {res.status_code}")
     except Exception as e:
-        log_info(f"שגיאה בסנכרון sheets: {e}")
+        log_info(f"שגיאה בחיבור ל-Google Sheets: {e}")
 
 @app.on_event("startup")
 def startup():
@@ -101,22 +105,27 @@ def transcribe_audio(path_or_url: str) -> str:
         log_info(f"Audio recognition error: {e}")
         return ""
 
-# ==================== יצירת שלוחה וירטואלית עבור ניתוביה ====================
+# ==================== יצירת שלוחת ניתוביה וחיוג ====================
 
-def route_via_nitoviya(target_phone: str, caller_phone: str, call_id: str):
+def route_via_nitoviya(target_phone: str, caller_phone: str):
     """
-    יוצר שלוחה ייעודית למתקשר עם הגדרות nitoviya ומעביר אותו אליה
-    בצורה הזו מספר מתקשרים במקביל אינם מתנגשים
+    יוצר שלוחת ניתוביה מותאמת אישית למתקשר ללא שורות מיותרות
     """
-    # מזהה ייחודי לתיקייה (לפי טלפון או מזהה שיחה)
-    unique_folder = f"routing/{caller_phone}"
-    
-    # הגדרות השלוחה המבוקשות
-    ini_content = f"type=nitoviya\nnitoviya_dial_to={target_phone}\n"
-    
+    # 1. ניקוי המספר לספרות בלבד
+    clean_target = re.sub(r"\D", "", target_phone)
+    if clean_target.startswith("972"):
+        clean_target = "0" + clean_target[3:]
+
+    # 2. שלוחה מספרית תחת 99 לפי מספר המתקשר
+    clean_caller = re.sub(r"\D", "", caller_phone)
+    unique_folder = f"99/{clean_caller}"
+
+    # 3. בדיוק שתי השורות שדורש מודול ניתוביה עם ירידת שורה של ווינדוס (\r\n)
+    ini_content = f"type=nitoviya\r\nnitoviya_dial_to={clean_target}\r\n"
+
     try:
-        log_info(f"מגדיר שלוחת ניתוביה בשלוחה {unique_folder} עבור היעד {target_phone}...")
-        url = f"https://www.call2all.co.il/ym/api/UploadFile"
+        log_info(f"מגדיר ניתוביה בשלוחה {unique_folder} עבור היעד {clean_target}...")
+        url = "https://www.call2all.co.il/ym/api/UploadFile"
         files = {
             'file': ('ext.ini', io.BytesIO(ini_content.encode('utf-8')), 'text/plain')
         }
@@ -126,14 +135,14 @@ def route_via_nitoviya(target_phone: str, caller_phone: str, call_id: str):
             'convertAudio': '0'
         }
         res = requests.post(url, params=params, files=files, timeout=10)
-        log_info(f"תשובת עדכון שלוחה מימות המשיח: {res.text}")
+        log_info(f"תשובת ימות המשיח: {res.text}")
     except Exception as e:
-        log_info(f"שגיאה בהגדרת שלוחת ניתוביה: {e}")
+        log_info(f"שגיאה בהגדרת ניתוביה: {e}")
 
-    # העברת המשתמש לשלוחה שנוצרה
+    # העברת המשתמש לשלוחה
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# הגדרות מקשים נקיות ללא אישורים
+# תבניות מקשים והקלטות ללא אישורים כפולים
 MENU_KEY_PARAMS = "val,no,1,1,7,NO,,,,,,,,no"
 PHONE_KEY_PARAMS = "val,no,9,11,7,NO,,,,,,,,no"
 HEBREW_KEY_PARAMS = "val,no,1,15,7,HebrewKeyboard,,,,,,,,no"
@@ -155,7 +164,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             pass
 
     caller_phone = params.get("ApiPhone", "000")
-    call_id = params.get("ApiCallId", "0")
     val = params.get("val", "").strip()
     hangup = params.get("hangup", "")
 
@@ -254,8 +262,8 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(f"read=t-לחיפוש קולי 1, להקלדה 2={MENU_KEY_PARAMS}")
         elif val == "4":
-            # ניתוב דרך שלוחת nitoviya ייעודית למתקשר
-            return route_via_nitoviya(c_phone, caller_phone, call_id)
+            # ניתוב דרך מודול nitoviya
+            return route_via_nitoviya(c_phone, caller_phone)
         elif val == "5":
             if user["mode"] == "general":
                 cache_personal.append({"owner": caller_phone, "name": c_name, "phone": c_phone})
