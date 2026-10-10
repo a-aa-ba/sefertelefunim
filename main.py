@@ -10,15 +10,14 @@ from fastapi.responses import PlainTextResponse
 app = FastAPI()
 
 # כתובת ה-Web App של Google Sheets
-GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
+GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/execהדבק_כאן_את_הקישור_מגוגל_סקריפט")
 
-# מטמון בזיכרון מהיר (ללא שיהוי בטלפון)
-cache_contacts = []   # [{"name": "...", "phone": "..."}]
-cache_personal = []   # [{"owner": "...", "name": "...", "phone": "..."}]
+# מטמון בזיכרון מהיר
+cache_contacts = []
+cache_personal = []
 sessions = {}
 
 def sync_from_sheets():
-    """טעינת כל הנתונים מהגיליון לזיכרון של השרת"""
     global cache_contacts, cache_personal
     try:
         res = requests.get(f"{GOOGLE_SCRIPT_URL}?action=getAll", timeout=15)
@@ -36,11 +35,9 @@ def startup():
 
 @app.get("/refresh")
 def manual_refresh():
-    """קריאה לכתובת זו מרעננת את הנתונים מ-Google Sheets מיד לאחר שהדבקת אקסל"""
     sync_from_sheets()
     return {"status": "ok", "total_contacts": len(cache_contacts)}
 
-# פונקציות לעדכון Google Sheets ברקע (אינן מעכבות את המשתמש בקו)
 def post_to_sheets(payload: dict):
     try:
         requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=10)
@@ -58,7 +55,6 @@ def get_session(phone: str):
     return sessions[phone]
 
 def transcribe_audio_from_url(audio_url: str) -> str:
-    """הורדת הקלטה מימות המשיח והמרה לטקסט דרך גוגל"""
     try:
         r = requests.get(audio_url, timeout=10)
         sound = AudioSegment.from_file(io.BytesIO(r.content))
@@ -76,14 +72,18 @@ def transcribe_audio_from_url(audio_url: str) -> str:
         print(f"Audio recognition error: {e}")
         return ""
 
-# ==================== ניתוב שיחה ראשי (ימות המשיח) ====================
+# ==================== הנתיב הראשי: מאזין ישירות לכתובת הבסיס ====================
 
-@app.api_route("/ivr", methods=["GET", "POST"])
-async def ivr_endpoint(request: Request, background_tasks: BackgroundTasks):
+@app.api_route("/", methods=["GET", "POST"])
+async def root_endpoint(request: Request, background_tasks: BackgroundTasks):
     if request.method == "POST":
         params = dict(await request.form())
     else:
         params = dict(request.query_params)
+
+    # מענה שקט בעת ניתוק שיחה (מונע שגיאות ביומן)
+    if params.get("hangup") == "yes":
+        return PlainTextResponse("ok")
 
     caller_phone = params.get("ApiPhone", "")
     action = params.get("action", "main_menu")
@@ -177,9 +177,7 @@ async def ivr_endpoint(request: Request, background_tasks: BackgroundTasks):
             return PlainTextResponse(f"routing={phone}")
         elif val == "5":
             if sess["mode"] == "general":
-                # שמירה מיידית בזיכרון
                 cache_personal.append({"owner": caller_phone, "name": name, "phone": phone})
-                # סנכרון לשיטס ברקע
                 background_tasks.add_task(
                     post_to_sheets,
                     {"action": "addPersonal", "owner": caller_phone, "name": name, "phone": phone}
@@ -214,11 +212,9 @@ async def ivr_endpoint(request: Request, background_tasks: BackgroundTasks):
                 f"id_list_message=t-שמך במערכת הוא: {u_name}. ומספר הטלפון הוא: {caller_phone}.&action=personal_zone_check"
             )
         elif val == "2":
-            # מעבר לרישום/עדכון
             sess["update_mode"] = True
             return PlainTextResponse("id_list_message=&action=register_start")
         elif val == "3":
-            # אלפון אישי
             p_list = [c for c in cache_personal if c["owner"] == caller_phone]
             if not p_list:
                 return PlainTextResponse("id_list_message=t-האלפון האישי שלך ריק.&action=personal_zone_check")
@@ -248,18 +244,13 @@ async def ivr_endpoint(request: Request, background_tasks: BackgroundTasks):
 
     if action == "register_confirm_name":
         if val == "1":
-            # אם הוא בא מעדכון פרטים באיזור אישי, משתמשים ישירות במספר שלו
             if sess.get("update_mode"):
                 new_name = sess.get("temp_name")
                 sess["update_mode"] = False
-                
-                # עדכון בזיכרון
                 for c in cache_contacts:
                     if c["phone"] == caller_phone:
                         c["name"] = new_name
                         break
-                
-                # עדכון בשיטס ברקע
                 background_tasks.add_task(
                     post_to_sheets,
                     {"action": "update", "name": new_name, "phone": caller_phone}
@@ -278,10 +269,7 @@ async def ivr_endpoint(request: Request, background_tasks: BackgroundTasks):
         if len(new_phone) < 9:
             return PlainTextResponse("id_list_message=t-מספר טלפון שגוי.&action=register_phone")
 
-        # עדכון מקומי בזיכרון מיד
         cache_contacts.append({"name": new_name, "phone": new_phone})
-
-        # שמירה ב-Google Sheets ברקע
         background_tasks.add_task(
             post_to_sheets,
             {"action": "register", "name": new_name, "phone": new_phone}
@@ -293,8 +281,6 @@ async def ivr_endpoint(request: Request, background_tasks: BackgroundTasks):
 
     return PlainTextResponse("id_list_message=t-שגיאה בניתוב&action=main_menu")
 
-
-# ==================== פונקציות עזר ====================
 
 def execute_search(query: str, caller_phone: str, mode: str = "general"):
     matches = [c for c in cache_contacts if query in c["name"]]
