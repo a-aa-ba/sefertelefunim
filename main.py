@@ -60,11 +60,11 @@ def calculate_similarity(query: str, target: str) -> float:
     if q == t:
         return 1.0
 
-    # 2. הכלה מלאה (למשל: חיפוש שם פרטי מתוך שם מלא)
+    # 2. הכלה מלאה
     if q in t or t in q:
         return 0.95
 
-    # 3. בדיקת דמיון מילה-מול-מילה (למשל: 'ישראל כהן' מול 'ישראל קוהן')
+    # 3. בדיקת דמיון מילה-מול-מילה
     q_words = q.split()
     t_words = t.split()
     word_scores = []
@@ -285,16 +285,8 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "id_list_message=t-השם לא נקלט&"
                 f"read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2={MENU_KEY_PARAMS}"
             )
-        user["temp_name"] = text
-        user["step"] = "confirm_voice_search"
-        return PlainTextResponse(f"read=t-חיפשת את {text}, לאישור הקישו 1, להקלטה חוזרת 2={MENU_KEY_PARAMS}")
-
-    if user["step"] == "confirm_voice_search":
-        if val == "1":
-            return do_search(user["temp_name"], user, mode="general")
-        else:
-            user["step"] = "search_voice_record"
-            return PlainTextResponse(f"read=t-נא לומר את השם לחיפוש שוב וסולמית לסיום={RECORD_PARAMS}")
+        # מעבר ישיר לחיפוש ללא בקשת אישור
+        return do_search(text, user, mode="general")
 
     if user["step"] == "search_tap":
         return do_search(clean_yemot_text(val), user, mode="general")
@@ -368,26 +360,21 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
 
     if user["step"] == "update_voice":
         record_path = val or params.get("ApiRecordPath", "")
-        text = transcribe_audio(record_path)
-        user["temp_name"] = text
-        user["step"] = "confirm_update"
-        return PlainTextResponse(f"read=t-אמרת {text}, לאישור 1, להקלטה חוזרת 2={MENU_KEY_PARAMS}")
-
-    if user["step"] == "confirm_update":
-        if val == "1":
-            new_name = user["temp_name"]
-            for c in cache_contacts:
-                if c["phone"] == caller_phone:
-                    c["name"] = new_name
-            background_tasks.add_task(post_to_sheets, {"action": "update", "name": new_name, "phone": caller_phone})
-            user["step"] = "main_menu"
-            return PlainTextResponse(
-                f"id_list_message=t-שמך עודכן בהצלחה ל {new_name}&"
-                f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}"
-            )
-        else:
+        new_name = transcribe_audio(record_path)
+        if not new_name:
             user["step"] = "update_voice"
-            return PlainTextResponse(f"read=t-נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
+            return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
+
+        # עדכון מיידי ללא שלב אישור
+        for c in cache_contacts:
+            if c["phone"] == caller_phone:
+                c["name"] = new_name
+        background_tasks.add_task(post_to_sheets, {"action": "update", "name": new_name, "phone": caller_phone})
+        user["step"] = "main_menu"
+        return PlainTextResponse(
+            f"id_list_message=t-שמך עודכן בהצלחה ל {new_name}&"
+            f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}"
+        )
 
     # 5. שלוחה 3: רישום חדש
     if user["step"] == "register_voice":
@@ -396,17 +383,11 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         if not text:
             user["step"] = "register_voice"
             return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך וסולמית לסיום={RECORD_PARAMS}")
+        
+        # מעבר ישיר להקשת מספר הטלפון ללא שלב אישור
         user["temp_name"] = text
-        user["step"] = "confirm_register_name"
-        return PlainTextResponse(f"read=t-אמרת {text}, לאישור 1, להקלטה חוזרת 2={MENU_KEY_PARAMS}")
-
-    if user["step"] == "confirm_register_name":
-        if val == "1":
-            user["step"] = "register_phone"
-            return PlainTextResponse(f"read=t-נא להקיש את מספר הטלפון וסולמית לסיום={PHONE_KEY_PARAMS}")
-        else:
-            user["step"] = "register_voice"
-            return PlainTextResponse(f"read=t-נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
+        user["step"] = "register_phone"
+        return PlainTextResponse(f"read=t-נא להקיש את מספר הטלפון עבור {text} וסולמית לסיום={PHONE_KEY_PARAMS}")
 
     if user["step"] == "register_phone":
         new_phone = val
@@ -429,14 +410,11 @@ def do_search(query: str, user: dict, mode: str = "general"):
     clean_q = normalize_hebrew(query)
     scored_results = []
 
-    # מעבר על כל המאגר וחישוב ציון התאמה לכל איש קשר
     for c in cache_contacts:
         score = calculate_similarity(clean_q, c["name"])
-        # סף קליטה: 0.65 תופס החלפת אות בודדת, תעתיק פונטי או שגיאות כתיב
         if score >= 0.65:
             scored_results.append((score, c))
 
-    # מיון לפי הציון הגבוה ביותר
     scored_results.sort(key=lambda x: x[0], reverse=True)
     matches = [item[1] for item in scored_results]
 
