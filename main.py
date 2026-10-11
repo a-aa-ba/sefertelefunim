@@ -1,7 +1,6 @@
 import os
 import io
 import re
-import time
 import json
 import threading
 import requests
@@ -84,6 +83,7 @@ def calculate_similarity(query: str, target: str) -> float:
 def sync_from_sheets():
     global cache_contacts, cache_personal
     try:
+        log_info("מתחיל בסנכרון נתונים מ-Google Sheets...")
         res = requests.get(f"{GOOGLE_SCRIPT_URL}?action=getAll", timeout=15)
         if res.status_code == 200:
             data = res.json()
@@ -107,12 +107,6 @@ def sync_from_sheets():
     except Exception as e:
         log_info(f"שגיאה בחיבור ל-Google Sheets: {e}")
 
-def auto_sync_loop():
-    """לולאת רקע המרעננת את הנתונים מהגיליון כל 30 שניות באופן שקט"""
-    while True:
-        time.sleep(30)
-        sync_from_sheets()
-
 def ensure_routing_parent_folder():
     try:
         url = "https://www.call2all.co.il/ym/api/UploadFile"
@@ -131,9 +125,9 @@ def ensure_routing_parent_folder():
 
 @app.on_event("startup")
 def startup():
+    # סנכרון חד-פעמי בעליית השרת בלבד
     threading.Thread(target=sync_from_sheets, daemon=True).start()
     threading.Thread(target=ensure_routing_parent_folder, daemon=True).start()
-    threading.Thread(target=auto_sync_loop, daemon=True).start()
 
 @app.get("/refresh")
 def manual_refresh():
@@ -227,14 +221,14 @@ def route_via_nitoviya(target_phone: str):
 
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# ==================== ניתוב שיחה ראשי ====================
+# ==================== ניתוב שיחה ראשי (הגדרות נפרדות לכל פעולה) ====================
 
 @app.api_route("/", methods=["GET", "POST", "HEAD"])
 async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return PlainTextResponse("ok")
 
-    # חילוץ הפרמטרים תוך טיפול בצבירת ערכי val
+    # חילוץ הפרמטרים תוך התחשבות בצבירת ערכי val
     if request.method == "POST":
         try:
             form = await request.form()
@@ -399,7 +393,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         c_name = clean_yemot_text(matched["name"])
         c_phone = normalize_phone(matched["phone"])
         
-        # השמעת התוצאה ותפריט: 1 לחיוג, 2 לחיפוש מחדש, 3 ליציאה
         return PlainTextResponse(
             f"id_list_message=t-נמצא איש קשר {c_name}, מספר טלפון {c_phone}&"
             "read=t-לחיוג הקישו 1, לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
@@ -407,18 +400,15 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
 
     if user["step"] == "search_by_phone_menu":
         if val == "1":
-            # חיוג לאיש הקשר שנמצא
             contact = user.get("found_phone_contact")
             if contact:
                 return route_via_nitoviya(contact["phone"])
             user["step"] = "search_by_phone_input"
             return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no")
         elif val == "2":
-            # חיפוש מחדש
             user["step"] = "search_by_phone_input"
             return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no")
         elif val == "3":
-            # יציאה לתפריט ראשי
             user["step"] = "main_menu"
             return PlainTextResponse(
                 "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
@@ -465,10 +455,14 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "read=t-השם לא נקלט, נא לומר את שמך שוב וסולמית לסיום=val,no,record,,,no"
             )
 
+        # עדכון מקומי בזיכרון
         for c in cache_contacts:
             if c["phone"] == caller_phone:
                 c["name"] = new_name
+        
+        # שמירה ב-Google Sheets ברקע
         background_tasks.add_task(post_to_sheets, {"action": "update", "name": new_name, "phone": caller_phone})
+        
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-שמך עודכן בהצלחה ל {new_name}&"
@@ -505,8 +499,13 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if user["step"] == "register_phone":
         new_phone = normalize_phone(val)
         new_name = user["temp_name"]
+        
+        # עדכון מקומי בזיכרון של השרת מיד
         cache_contacts.append({"name": new_name, "phone": new_phone})
+        
+        # כתיבה ל-Google Sheets ברקע
         background_tasks.add_task(post_to_sheets, {"action": "register", "name": new_name, "phone": new_phone})
+        
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-נרשמת בהצלחה השם {new_name} מספר {new_phone}&"
