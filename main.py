@@ -269,12 +269,12 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         if val == "1":
             user["step"] = "menu_search"
             return PlainTextResponse(
-                "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,,no"
             )
         elif val == "2":
             user["step"] = "search_by_phone_input"
             return PlainTextResponse(
-                "read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no"
+                "read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,,no"
             )
         elif val == "3":
             matched = next((c for c in cache_contacts if c["phone"] == caller_phone), None)
@@ -282,12 +282,12 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 user["step"] = "main_menu"
                 return PlainTextResponse(
                     "id_list_message=t-מספר הטלפון אינו מופיע במאגר, ניתן להירשם בשלוחה 4&"
-                    "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+                    "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
                 )
             user["user_name"] = clean_yemot_text(matched["name"])
             user["step"] = "personal_menu"
             return PlainTextResponse(
-                "read=t-שלום, לשמיעת הפרטים האישיים הקישו 1, לשינוי הפרטים הקישו 2, לאלפון אישי הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-שלום, לשמיעת הפרטים האישיים הקישו 1, לשינוי הפרטים הקישו 2, לאלפון אישי הקישו 3=val,no,1,1,7,NO,,,,,,,,,no"
             )
         elif val == "4":
             user["step"] = "register_voice"
@@ -303,7 +303,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             return PlainTextResponse("go_to_folder=/7")
         else:
             return PlainTextResponse(
-                "read=t-בחירה שגויה, לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-בחירה שגויה, לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
             )
 
     # ==================== שלוחה 1: חיפוש לפי שם ====================
@@ -316,7 +316,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         elif val == "2":
             user["step"] = "search_tap"
             return PlainTextResponse(
-                "read=t-נא להקליד את השם לחיפוש וסולמית לסיום=val,no,15,1,7,HebrewKeyboard,,,,,,,,no"
+                "read=t-נא להקליד את השם לחיפוש וסולמית לסיום=val,no,15,1,7,HebrewKeyboard,,,,,,,,,no"
             )
 
     if user["step"] == "search_voice_record":
@@ -325,7 +325,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(
                 "id_list_message=t-השם לא נקלט&"
-                "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,,no"
             )
         return do_search(text, user, mode="general")
 
@@ -355,7 +355,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         elif val == "3":
             user["step"] = "menu_search"
             return PlainTextResponse(
-                "read=t-לחיפוש קולי 1, להקלדה 2=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש קולי 1, להקלדה 2=val,no,1,1,7,NO,,,,,,,,,no"
             )
         elif val == "4":
             return route_via_nitoviya(c_phone)
@@ -373,7 +373,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         elif val == "6":
             user["step"] = "main_menu"
             return PlainTextResponse(
-                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
             )
 
     # ==================== שלוחה 2: חיפוש לפי מספר טלפון ====================
@@ -385,7 +385,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "search_by_phone_menu"
             return PlainTextResponse(
                 "id_list_message=t-לא נמצא איש קשר עבור מספר זה&"
-                "read=t-לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,,no"
             )
 
         user["found_phone_contact"] = matched
@@ -395,7 +395,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         
         return PlainTextResponse(
             f"id_list_message=t-נמצא איש קשר {c_name}, מספר טלפון {c_phone}&"
-            "read=t-לחיוג הקישו 1, לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-לחיוג הקישו 1, לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,,no"
         )
 
     if user["step"] == "search_by_phone_menu":
@@ -404,18 +404,18 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             if contact:
                 return route_via_nitoviya(contact["phone"])
             user["step"] = "search_by_phone_input"
-            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no")
+            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,,no")
         elif val == "2":
             user["step"] = "search_by_phone_input"
-            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no")
+            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,,no")
         elif val == "3":
             user["step"] = "main_menu"
             return PlainTextResponse(
-                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
             )
         else:
             return PlainTextResponse(
-                "read=t-בחירה שגויה, לחיוג הקישו 1, לחיפוש מחדש 2, ליציאה 3=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-בחירה שגויה, לחיוג הקישו 1, לחיפוש מחדש 2, ליציאה 3=val,no,1,1,7,NO,,,,,,,,,no"
             )
 
     # ==================== שלוחה 3: אזור אישי ====================
@@ -423,7 +423,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         if val == "1":
             return PlainTextResponse(
                 f"id_list_message=t-שמך הוא {user.get('user_name')}, ומספר הטלפון {caller_phone}&"
-                "read=t-לשמיעה 1, לשינוי 2, לאלפון אישי 3=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לשמיעה 1, לשינוי 2, לאלפון אישי 3=val,no,1,1,7,NO,,,,,,,,,no"
             )
         elif val == "2":
             user["step"] = "update_voice"
@@ -435,7 +435,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             if not p_list:
                 return PlainTextResponse(
                     "id_list_message=t-האלפון האישי שלך ריק&"
-                    "read=t-לשמיעה 1, לשינוי 2, לאלפון 3=val,no,1,1,7,NO,,,,,,,,no"
+                    "read=t-לשמיעה 1, לשינוי 2, לאלפון 3=val,no,1,1,7,NO,,,,,,,,,no"
                 )
             user["search_results"] = p_list
             user["current_index"] = 0
@@ -464,7 +464,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-שמך עודכן בהצלחה ל {new_name}&"
-            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
         )
 
     # ==================== שלוחה 4: רישום חדש ====================
@@ -479,14 +479,14 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         user["temp_name"] = text
         user["step"] = "confirm_register_name"
         return PlainTextResponse(
-            f"read=t-השם שנקלט הוא {text}, לאישור הקישו 1, להקלטה חוזרת 2=val,no,1,1,7,NO,,,,,,,,no"
+            f"read=t-השם שנקלט הוא {text}, לאישור הקישו 1, להקלטה חוזרת 2=val,no,1,1,7,NO,,,,,,,,,no"
         )
 
     if user["step"] == "confirm_register_name":
         if val == "1":
             user["step"] = "register_phone"
             return PlainTextResponse(
-                f"read=t-נא להקיש את מספר הטלפון עבור {user['temp_name']} וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no"
+                f"read=t-נא להקיש את מספר הטלפון עבור {user['temp_name']} וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,,no"
             )
         else:
             user["step"] = "register_voice"
@@ -504,13 +504,13 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-נרשמת בהצלחה השם {new_name} מספר {new_phone}&"
-            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
         )
 
     # ברירת מחדל
     user["step"] = "main_menu"
     return PlainTextResponse(
-        "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
+        "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,,no"
     )
 
 # ==================== ביצוע חיפוש חכם ומדורג לפי שם ====================
@@ -531,7 +531,7 @@ def do_search(query: str, user: dict, mode: str = "general"):
         user["step"] = "menu_search"
         return PlainTextResponse(
             "id_list_message=t-לא נמצאו תוצאות לשם המבוקש&"
-            "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,,no"
         )
 
     user["search_results"] = matches
@@ -556,7 +556,7 @@ def get_menu_text(name: str, phone: str, mode: str = "general"):
     else:
         t = f"t-איש קשר {name}, טלפון {phone_clean}, לשמיעה חוזרת 0, לאיש קשר הבא 1, לקודם 2, לחיפוש חדש 3, לחיוג 4, ליציאה 6"
     
-    return f"read={t}=val,no,1,1,7,NO,,,,,,,,no"
+    return f"read={t}=val,no,1,1,7,NO,,,,,,,,,no"
 
 def play_contact(name: str, phone: str, mode: str = "general"):
     return PlainTextResponse(get_menu_text(name, phone, mode))
