@@ -14,7 +14,7 @@ app = FastAPI()
 
 # משתני סביבה
 GOOGLE_SCRIPT_URL = os.getenv("GOOGLE_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbzLJrs2r6AsceENCsqbB1lLdo6jrIxErSNflNq-IaifcNESqyV3IgYG7SAjTy5L2RCjag/exec")
-YEMOT_TOKEN = os.getenv("YEMOT_TOKEN", "093136451:112131")
+YEMOT_TOKEN = os.getenv("YEMOT_TOKEN", "0747956249:45948954")
 
 cache_contacts = []
 cache_personal = []
@@ -125,7 +125,6 @@ def ensure_routing_parent_folder():
 
 @app.on_event("startup")
 def startup():
-    # סנכרון חד-פעמי בעליית השרת בלבד
     threading.Thread(target=sync_from_sheets, daemon=True).start()
     threading.Thread(target=ensure_routing_parent_folder, daemon=True).start()
 
@@ -221,14 +220,14 @@ def route_via_nitoviya(target_phone: str):
 
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# ==================== ניתוב שיחה ראשי (הגדרות נפרדות לכל פעולה) ====================
+# ==================== ניתוב שיחה ראשי ====================
 
 @app.api_route("/", methods=["GET", "POST", "HEAD"])
 async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return PlainTextResponse("ok")
 
-    # חילוץ הפרמטרים תוך התחשבות בצבירת ערכי val
+    # חילוץ הפרמטרים
     if request.method == "POST":
         try:
             form = await request.form()
@@ -259,10 +258,10 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     log_info(f"שלב נוכחי: {user['step']}")
 
     # 1. תפריט ראשי
-    # 1: חיפוש שם | 2: חיפוש מספר | 3: אזור אישי | 4: רישום חדש | 5: הודעה למנהל
+    # 1: חיפוש שם | 2: חיפוש מספר | 3: אזור אישי | 4: רישום חדש | 5: אלפון ישן | (7 סמוי לניהול)
     if not val and user["step"] == "main_menu":
         return PlainTextResponse(
-            "read=t-שלום וברכה, לחיפוש בספר הטלפונים לפי שם הקישו 1, לחיפוש לפי מספר טלפון הקישו 2, לאזור אישי הקישו 3, לרישום מספר חדש הקישו 4, להשארת הודעה הקישו 5=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-שלום וברכה, לחיפוש בספר הטלפונים לפי שם הקישו 1, לחיפוש לפי מספר טלפון הקישו 2, לאזור אישי הקישו 3, לרישום מספר חדש הקישו 4, לאלפון הישן הקישו 5=val,no,1,1,7,NO,,,,,,,,no"
         )
 
     # 2. ניתוב מהתפריט הראשי
@@ -273,19 +272,17 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
             )
         elif val == "2":
-            # שלוחה 2: חיפוש לפי מספר טלפון
             user["step"] = "search_by_phone_input"
             return PlainTextResponse(
                 "read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no"
             )
         elif val == "3":
-            # שלוחה 3: אזור אישי
             matched = next((c for c in cache_contacts if c["phone"] == caller_phone), None)
             if not matched:
                 user["step"] = "main_menu"
                 return PlainTextResponse(
                     "id_list_message=t-מספר הטלפון אינו מופיע במאגר, ניתן להירשם בשלוחה 4&"
-                    "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+                    "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
                 )
             user["user_name"] = clean_yemot_text(matched["name"])
             user["step"] = "personal_menu"
@@ -293,17 +290,20 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "read=t-שלום, לשמיעת הפרטים האישיים הקישו 1, לשינוי הפרטים הקישו 2, לאלפון אישי הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
             )
         elif val == "4":
-            # שלוחה 4: רישום שם ומספר חדש
             user["step"] = "register_voice"
             return PlainTextResponse(
                 "read=t-נא לומר את שמך לאחר הצליל ולסיום הקישו סולמית=val,no,record,,,no"
             )
         elif val == "5":
-            # שלוחה 5: הודעה למנהל (מעבר לשלוחה 7/1)
-            return PlainTextResponse("go_to_folder=/7/1")
+            # מעבר ישיר לאלפון הישן (שלוחה 5)
+            return PlainTextResponse("go_to_folder=/5")
+        elif val == "7":
+            # מעבר סמוי לשלוחת ניהול (שלוחה 7)
+            log_info(f"המתקשר {caller_phone} הקיש 7 ועובר לשלוחת ניהול")
+            return PlainTextResponse("go_to_folder=/7")
         else:
             return PlainTextResponse(
-                "read=t-בחירה שגויה, לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-בחירה שגויה, לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
             )
 
     # ==================== שלוחה 1: חיפוש לפי שם ====================
@@ -373,7 +373,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         elif val == "6":
             user["step"] = "main_menu"
             return PlainTextResponse(
-                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
             )
 
     # ==================== שלוחה 2: חיפוש לפי מספר טלפון ====================
@@ -411,7 +411,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         elif val == "3":
             user["step"] = "main_menu"
             return PlainTextResponse(
-                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
             )
         else:
             return PlainTextResponse(
@@ -455,18 +455,16 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 "read=t-השם לא נקלט, נא לומר את שמך שוב וסולמית לסיום=val,no,record,,,no"
             )
 
-        # עדכון מקומי בזיכרון
         for c in cache_contacts:
             if c["phone"] == caller_phone:
                 c["name"] = new_name
         
-        # שמירה ב-Google Sheets ברקע
         background_tasks.add_task(post_to_sheets, {"action": "update", "name": new_name, "phone": caller_phone})
         
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-שמך עודכן בהצלחה ל {new_name}&"
-            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
         )
 
     # ==================== שלוחה 4: רישום חדש ====================
@@ -500,22 +498,19 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         new_phone = normalize_phone(val)
         new_name = user["temp_name"]
         
-        # עדכון מקומי בזיכרון של השרת מיד
         cache_contacts.append({"name": new_name, "phone": new_phone})
-        
-        # כתיבה ל-Google Sheets ברקע
         background_tasks.add_task(post_to_sheets, {"action": "register", "name": new_name, "phone": new_phone})
         
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-נרשמת בהצלחה השם {new_name} מספר {new_phone}&"
-            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
         )
 
     # ברירת מחדל
     user["step"] = "main_menu"
     return PlainTextResponse(
-        "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+        "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, לאלפון הישן 5=val,no,1,1,7,NO,,,,,,,,no"
     )
 
 # ==================== ביצוע חיפוש חכם ומדורג לפי שם ====================
