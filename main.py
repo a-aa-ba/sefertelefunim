@@ -32,7 +32,6 @@ def clean_yemot_text(text: str) -> str:
 # ==================== אלגוריתם חיפוש מטושטש / שמות דומים ====================
 
 def normalize_hebrew(s: str) -> str:
-    """מנרמל אותיות סופיות לאותיות רגילות ומנקה רווחים"""
     if not s:
         return ""
     trans = str.maketrans({
@@ -46,25 +45,18 @@ def normalize_hebrew(s: str) -> str:
     return re.sub(r'[\s\-_]+', ' ', cleaned).strip()
 
 def calculate_similarity(query: str, target: str) -> float:
-    """
-    חישוב ציון דמיון בין 0.0 ל-1.0
-    מתחשב בהכלה, מילים בודדות, והבדלים של אותיות בודדות
-    """
     q = normalize_hebrew(query)
     t = normalize_hebrew(target)
 
     if not q or not t:
         return 0.0
 
-    # 1. זהות מוחלטת
     if q == t:
         return 1.0
 
-    # 2. הכלה מלאה
     if q in t or t in q:
         return 0.95
 
-    # 3. בדיקת דמיון מילה-מול-מילה
     q_words = q.split()
     t_words = t.split()
     word_scores = []
@@ -73,8 +65,6 @@ def calculate_similarity(query: str, target: str) -> float:
         word_scores.append(best_match_for_qw)
 
     avg_word_score = sum(word_scores) / len(word_scores) if word_scores else 0.0
-
-    # 4. דמיון כולל של כל המחרוזת
     full_ratio = SequenceMatcher(None, q, t).ratio()
 
     return max(full_ratio, avg_word_score)
@@ -152,8 +142,10 @@ def download_audio_from_yemot(path_or_url: str) -> bytes:
     
     log_info(f"מוריד קובץ שמע מכתובת: {download_url}")
     r = requests.get(download_url, timeout=15)
-    if r.status_code != 200:
-        raise Exception(f"Failed to download audio file (Status: {r.status_code})")
+    if r.status_code != 200 or len(r.content) < 100:
+        raise Exception(f"Failed to download audio file (Status: {r.status_code}, Length: {len(r.content)})")
+    
+    log_info(f"קובץ שמע הורד בהצלחה (גודל: {len(r.content)} בתים)")
     return r.content
 
 def transcribe_audio(path_or_url: str) -> str:
@@ -171,8 +163,14 @@ def transcribe_audio(path_or_url: str) -> str:
             text = recognizer.recognize_google(recorded, language="he-IL")
             log_info(f"זיהוי דיבור הצליח: '{text}'")
             return clean_yemot_text(text)
+    except sr.UnknownValueError:
+        log_info("Audio recognition error: גוגל לא הצליח לזהות מילים (הקלטה שקטה מדי או לא ברורה)")
+        return ""
+    except sr.RequestError as e:
+        log_info(f"Audio recognition error: שגיאת שרת גוגל ({e})")
+        return ""
     except Exception as e:
-        log_info(f"Audio recognition error: {e}")
+        log_info(f"Audio recognition error ({type(e).__name__}): {e or repr(e)}")
         return ""
 
 # ==================== ניתוביה וחיוג ====================
@@ -216,19 +214,30 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return PlainTextResponse("ok")
 
-    params = dict(request.query_params)
+    # שליפת כל הערכים תוך טיפול בצבירת val של ימות המשיח
     if request.method == "POST":
         try:
-            form_data = dict(await request.form())
-            params.update(form_data)
+            form = await request.form()
+            val_list = [v.strip() for v in form.getlist("val") if str(v).strip()]
+            params = dict(form)
         except Exception:
-            pass
+            val_list = []
+            params = {}
+    else:
+        val_list = [v.strip() for v in request.query_params.getlist("val") if str(v).strip()]
+        params = dict(request.query_params)
+
+    # הערך האחרון שנשלח על ידי המשתמש
+    val = val_list[-1] if val_list else ""
+    
+    # איתור מדויק של קובץ הקלטה אם נשלח (מסתיים ב-.wav)
+    wav_files = [v for v in val_list if v.endswith(".wav")]
+    latest_record_path = wav_files[-1] if wav_files else val
 
     caller_phone = params.get("ApiPhone", "000")
-    val = params.get("val", "").strip()
     hangup = params.get("hangup", "")
 
-    log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערך: '{val}' | שלב: {get_state(caller_phone)['step']}")
+    log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערכים שהתקבלו: {val_list} | ערך נבחר: '{val}' | קובץ שמע: '{latest_record_path}'")
 
     if hangup == "yes":
         if caller_phone in user_states:
@@ -236,6 +245,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         return PlainTextResponse("ok")
 
     user = get_state(caller_phone)
+    log_info(f"שלב נוכחי: {user['step']}")
 
     # 1. תפריט ראשי
     if not val and user["step"] == "main_menu":
@@ -277,15 +287,13 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             return PlainTextResponse(f"read=t-נא להקליד את השם לחיפוש וסולמית לסיום={HEBREW_KEY_PARAMS}")
 
     if user["step"] == "search_voice_record":
-        record_path = val or params.get("ApiRecordPath", "")
-        text = transcribe_audio(record_path)
+        text = transcribe_audio(latest_record_path)
         if not text:
             user["step"] = "menu_search"
             return PlainTextResponse(
                 "id_list_message=t-השם לא נקלט&"
                 f"read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2={MENU_KEY_PARAMS}"
             )
-        # מעבר ישיר לחיפוש ללא בקשת אישור
         return do_search(text, user, mode="general")
 
     if user["step"] == "search_tap":
@@ -359,13 +367,11 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             )
 
     if user["step"] == "update_voice":
-        record_path = val or params.get("ApiRecordPath", "")
-        new_name = transcribe_audio(record_path)
+        new_name = transcribe_audio(latest_record_path)
         if not new_name:
             user["step"] = "update_voice"
             return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
 
-        # עדכון מיידי ללא שלב אישור
         for c in cache_contacts:
             if c["phone"] == caller_phone:
                 c["name"] = new_name
@@ -378,13 +384,11 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
 
     # 5. שלוחה 3: רישום חדש
     if user["step"] == "register_voice":
-        record_path = val or params.get("ApiRecordPath", "")
-        text = transcribe_audio(record_path)
+        text = transcribe_audio(latest_record_path)
         if not text:
             user["step"] = "register_voice"
             return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך וסולמית לסיום={RECORD_PARAMS}")
         
-        # מעבר ישיר להקשת מספר הטלפון ללא שלב אישור
         user["temp_name"] = text
         user["step"] = "register_phone"
         return PlainTextResponse(f"read=t-נא להקיש את מספר הטלפון עבור {text} וסולמית לסיום={PHONE_KEY_PARAMS}")
