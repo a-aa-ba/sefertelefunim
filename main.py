@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import time
 import json
 import threading
 import requests
@@ -28,6 +29,15 @@ def clean_yemot_text(text: str) -> str:
     if not text:
         return ""
     return text.replace(".", " ").replace("-", " ").strip()
+
+def normalize_phone(phone: str) -> str:
+    """משלים אוטומטית את ה-0 המוביל אם נמחק באקסל/שיטס"""
+    clean = re.sub(r"\D", "", str(phone).strip())
+    if clean.startswith("972"):
+        clean = "0" + clean[3:]
+    elif len(clean) in (8, 9) and not clean.startswith("0"):
+        clean = "0" + clean
+    return clean
 
 # ==================== אלגוריתם חיפוש מטושטש / שמות דומים ====================
 
@@ -74,17 +84,34 @@ def calculate_similarity(query: str, target: str) -> float:
 def sync_from_sheets():
     global cache_contacts, cache_personal
     try:
-        log_info("מתחיל בסנכרון נתונים מ-Google Sheets...")
         res = requests.get(f"{GOOGLE_SCRIPT_URL}?action=getAll", timeout=15)
         if res.status_code == 200:
             data = res.json()
-            cache_contacts = data.get("contacts", [])
-            cache_personal = data.get("personal", [])
-            log_info(f"סנכרון הצליח: נטענו {len(cache_contacts)} אנשי קשר.")
+            raw_contacts = data.get("contacts", [])
+            cache_contacts = [
+                {"name": c["name"], "phone": normalize_phone(c["phone"])}
+                for c in raw_contacts if c.get("name") and c.get("phone")
+            ]
+            raw_personal = data.get("personal", [])
+            cache_personal = [
+                {
+                    "owner": normalize_phone(p["owner"]),
+                    "name": p["name"],
+                    "phone": normalize_phone(p["phone"])
+                }
+                for p in raw_personal if p.get("owner")
+            ]
+            log_info(f"סנכרון משיטס הושלם בהצלחה: {len(cache_contacts)} אנשי קשר במאגר.")
         else:
             log_info(f"שגיאה בסנכרון sheets: קוד {res.status_code}")
     except Exception as e:
         log_info(f"שגיאה בחיבור ל-Google Sheets: {e}")
+
+def auto_sync_loop():
+    """לולאת רקע המרעננת את הנתונים מהגיליון כל 30 שניות באופן שקט"""
+    while True:
+        time.sleep(30)
+        sync_from_sheets()
 
 def ensure_routing_parent_folder():
     try:
@@ -106,6 +133,7 @@ def ensure_routing_parent_folder():
 def startup():
     threading.Thread(target=sync_from_sheets, daemon=True).start()
     threading.Thread(target=ensure_routing_parent_folder, daemon=True).start()
+    threading.Thread(target=auto_sync_loop, daemon=True).start()
 
 @app.get("/refresh")
 def manual_refresh():
@@ -126,7 +154,8 @@ def get_state(phone: str):
             "search_results": [],
             "current_index": 0,
             "temp_name": "",
-            "mode": "general"
+            "mode": "general",
+            "found_phone_contact": None
         }
     return user_states[phone]
 
@@ -176,10 +205,7 @@ def transcribe_audio(path_or_url: str) -> str:
 # ==================== ניתוביה וחיוג ====================
 
 def route_via_nitoviya(target_phone: str):
-    clean_target = re.sub(r"\D", "", target_phone)
-    if clean_target.startswith("972"):
-        clean_target = "0" + clean_target[3:]
-
+    clean_target = normalize_phone(target_phone)
     unique_folder = f"routing/{clean_target}"
     ini_content = f"type=nitoviya\r\nnitoviya_dial_to={clean_target}\r\n"
 
@@ -201,19 +227,6 @@ def route_via_nitoviya(target_phone: str):
 
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# ==================== הגדרות שורה אחת לפי התיעוד הרשמי ====================
-# הקשת תפריט (ערך 1:שם, 2:no, 3:מקסימום 1, 4:מינימום 1, 5:זמן 7, 6:NO, 15:no ללא אישור)
-MENU_KEY_PARAMS = "val,no,1,1,7,NO,,,,,,,,no"
-
-# הקשת טלפון (ערך 3:מקסימום 11, ערך 4:מינימום 9, ערך 5:זמן 7, ערך 6:NO, 15:no ללא אישור)
-PHONE_KEY_PARAMS = "val,no,11,9,7,NO,,,,,,,,no"
-
-# מקלדת עברית (ערך 3:מקסימום 15, ערך 4:מינימום 1, ערך 5:זמן 7, ערך 6:HebrewKeyboard, 15:no ללא אישור)
-HEBREW_KEY_PARAMS = "val,no,15,1,7,HebrewKeyboard,,,,,,,,no"
-
-# הקלטה לפי עמוד 11 (ערך 1:שם, 2:no, 3:record, 4:ריק, 5:ריק, 6:no לסיום מידי ללא תפריט)
-RECORD_PARAMS = "val,no,record,,,no"
-
 # ==================== ניתוב שיחה ראשי ====================
 
 @app.api_route("/", methods=["GET", "POST", "HEAD"])
@@ -221,6 +234,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return PlainTextResponse("ok")
 
+    # חילוץ הפרמטרים תוך טיפול בצבירת ערכי val
     if request.method == "POST":
         try:
             form = await request.form()
@@ -237,7 +251,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     wav_files = [v for v in val_list if v.endswith(".wav")]
     latest_record_path = wav_files[-1] if wav_files else val
 
-    caller_phone = params.get("ApiPhone", "000")
+    caller_phone = normalize_phone(params.get("ApiPhone", "000"))
     hangup = params.get("hangup", "")
 
     log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערכים: {val_list} | ערך נבחר: '{val}' | קובץ שמע: '{latest_record_path}'")
@@ -251,43 +265,65 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     log_info(f"שלב נוכחי: {user['step']}")
 
     # 1. תפריט ראשי
+    # 1: חיפוש שם | 2: חיפוש מספר | 3: אזור אישי | 4: רישום חדש | 5: הודעה למנהל
     if not val and user["step"] == "main_menu":
         return PlainTextResponse(
-            f"read=t-שלום וברכה, לחיפוש בספר הטלפונים הקישו 1, לאזור אישי הקישו 2, לרישום מספר חדש הקישו 3, להשארת הודעה הקישו 4={MENU_KEY_PARAMS}"
+            "read=t-שלום וברכה, לחיפוש בספר הטלפונים לפי שם הקישו 1, לחיפוש לפי מספר טלפון הקישו 2, לאזור אישי הקישו 3, לרישום מספר חדש הקישו 4, להשארת הודעה הקישו 5=val,no,1,1,7,NO,,,,,,,,no"
         )
 
     # 2. ניתוב מהתפריט הראשי
     if user["step"] == "main_menu":
         if val == "1":
             user["step"] = "menu_search"
-            return PlainTextResponse(f"read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2={MENU_KEY_PARAMS}")
+            return PlainTextResponse(
+                "read=t-לחיפוש קולי הקישו 1, לחיפוש בהקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
+            )
         elif val == "2":
+            # שלוחה 2: חיפוש לפי מספר טלפון
+            user["step"] = "search_by_phone_input"
+            return PlainTextResponse(
+                "read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no"
+            )
+        elif val == "3":
+            # שלוחה 3: אזור אישי
             matched = next((c for c in cache_contacts if c["phone"] == caller_phone), None)
             if not matched:
                 user["step"] = "main_menu"
                 return PlainTextResponse(
-                    "id_list_message=t-מספר הטלפון אינו מופיע במאגר, ניתן להירשם בשלוחה 3&"
-                    f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}"
+                    "id_list_message=t-מספר הטלפון אינו מופיע במאגר, ניתן להירשם בשלוחה 4&"
+                    "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
                 )
             user["user_name"] = clean_yemot_text(matched["name"])
             user["step"] = "personal_menu"
-            return PlainTextResponse(f"read=t-שלום, לשמיעת הפרטים האישיים הקישו 1, לשינוי הפרטים הקישו 2, לאלפון אישי הקישו 3={MENU_KEY_PARAMS}")
-        elif val == "3":
-            user["step"] = "register_voice"
-            return PlainTextResponse(f"read=t-נא לומר את שמך לאחר הצליל ולסיום הקישו סולמית={RECORD_PARAMS}")
+            return PlainTextResponse(
+                "read=t-שלום, לשמיעת הפרטים האישיים הקישו 1, לשינוי הפרטים הקישו 2, לאלפון אישי הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
+            )
         elif val == "4":
+            # שלוחה 4: רישום שם ומספר חדש
+            user["step"] = "register_voice"
+            return PlainTextResponse(
+                "read=t-נא לומר את שמך לאחר הצליל ולסיום הקישו סולמית=val,no,record,,,no"
+            )
+        elif val == "5":
+            # שלוחה 5: הודעה למנהל (מעבר לשלוחה 7/1)
             return PlainTextResponse("go_to_folder=/7/1")
         else:
-            return PlainTextResponse(f"read=t-בחירה שגויה, לחיפוש 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}")
+            return PlainTextResponse(
+                "read=t-בחירה שגויה, לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+            )
 
-    # 3. שלוחה 1: חיפוש שם
+    # ==================== שלוחה 1: חיפוש לפי שם ====================
     if user["step"] == "menu_search":
         if val == "1":
             user["step"] = "search_voice_record"
-            return PlainTextResponse(f"read=t-נא לומר את השם לחיפוש לאחר הצליל וסולמית לסיום={RECORD_PARAMS}")
+            return PlainTextResponse(
+                "read=t-נא לומר את השם לחיפוש לאחר הצליל וסולמית לסיום=val,no,record,,,no"
+            )
         elif val == "2":
             user["step"] = "search_tap"
-            return PlainTextResponse(f"read=t-נא להקליד את השם לחיפוש וסולמית לסיום={HEBREW_KEY_PARAMS}")
+            return PlainTextResponse(
+                "read=t-נא להקליד את השם לחיפוש וסולמית לסיום=val,no,15,1,7,HebrewKeyboard,,,,,,,,no"
+            )
 
     if user["step"] == "search_voice_record":
         text = transcribe_audio(latest_record_path)
@@ -295,20 +331,20 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(
                 "id_list_message=t-השם לא נקלט&"
-                f"read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2={MENU_KEY_PARAMS}"
+                "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
             )
         return do_search(text, user, mode="general")
 
     if user["step"] == "search_tap":
         return do_search(clean_yemot_text(val), user, mode="general")
 
-    # ניווט בתוצאות
+    # ניווט בתוצאות חיפוש לפי שם (0-6)
     if user["step"] == "browse_results":
         res = user["search_results"]
         idx = user["current_index"]
         c = res[idx]
         c_name = clean_yemot_text(c["name"])
-        c_phone = c["phone"]
+        c_phone = normalize_phone(c["phone"])
 
         if val == "0":
             return play_contact(c_name, c_phone, user["mode"])
@@ -316,15 +352,17 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             if idx + 1 < len(res):
                 user["current_index"] += 1
             nxt = res[user["current_index"]]
-            return play_contact(clean_yemot_text(nxt["name"]), nxt["phone"], user["mode"])
+            return play_contact(clean_yemot_text(nxt["name"]), normalize_phone(nxt["phone"]), user["mode"])
         elif val == "2":
             if idx - 1 >= 0:
                 user["current_index"] -= 1
             prv = res[user["current_index"]]
-            return play_contact(clean_yemot_text(prv["name"]), prv["phone"], user["mode"])
+            return play_contact(clean_yemot_text(prv["name"]), normalize_phone(prv["phone"]), user["mode"])
         elif val == "3":
             user["step"] = "menu_search"
-            return PlainTextResponse(f"read=t-לחיפוש קולי 1, להקלדה 2={MENU_KEY_PARAMS}")
+            return PlainTextResponse(
+                "read=t-לחיפוש קולי 1, להקלדה 2=val,no,1,1,7,NO,,,,,,,,no"
+            )
         elif val == "4":
             return route_via_nitoviya(c_phone)
         elif val == "5":
@@ -340,24 +378,74 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
                 )
         elif val == "6":
             user["step"] = "main_menu"
-            return PlainTextResponse(f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}")
+            return PlainTextResponse(
+                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+            )
 
-    # 4. שלוחה 2: אזור אישי
+    # ==================== שלוחה 2: חיפוש לפי מספר טלפון ====================
+    if user["step"] == "search_by_phone_input":
+        search_num = normalize_phone(val)
+        matched = next((c for c in cache_contacts if normalize_phone(c["phone"]) == search_num), None)
+
+        if not matched:
+            user["step"] = "search_by_phone_menu"
+            return PlainTextResponse(
+                "id_list_message=t-לא נמצא איש קשר עבור מספר זה&"
+                "read=t-לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
+            )
+
+        user["found_phone_contact"] = matched
+        user["step"] = "search_by_phone_menu"
+        c_name = clean_yemot_text(matched["name"])
+        c_phone = normalize_phone(matched["phone"])
+        
+        # השמעת התוצאה ותפריט: 1 לחיוג, 2 לחיפוש מחדש, 3 ליציאה
+        return PlainTextResponse(
+            f"id_list_message=t-נמצא איש קשר {c_name}, מספר טלפון {c_phone}&"
+            "read=t-לחיוג הקישו 1, לחיפוש מחדש הקישו 2, ליציאה הקישו 3=val,no,1,1,7,NO,,,,,,,,no"
+        )
+
+    if user["step"] == "search_by_phone_menu":
+        if val == "1":
+            # חיוג לאיש הקשר שנמצא
+            contact = user.get("found_phone_contact")
+            if contact:
+                return route_via_nitoviya(contact["phone"])
+            user["step"] = "search_by_phone_input"
+            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no")
+        elif val == "2":
+            # חיפוש מחדש
+            user["step"] = "search_by_phone_input"
+            return PlainTextResponse("read=t-נא להקיש את מספר הטלפון לחיפוש וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no")
+        elif val == "3":
+            # יציאה לתפריט ראשי
+            user["step"] = "main_menu"
+            return PlainTextResponse(
+                "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+            )
+        else:
+            return PlainTextResponse(
+                "read=t-בחירה שגויה, לחיוג הקישו 1, לחיפוש מחדש 2, ליציאה 3=val,no,1,1,7,NO,,,,,,,,no"
+            )
+
+    # ==================== שלוחה 3: אזור אישי ====================
     if user["step"] == "personal_menu":
         if val == "1":
             return PlainTextResponse(
                 f"id_list_message=t-שמך הוא {user.get('user_name')}, ומספר הטלפון {caller_phone}&"
-                f"read=t-לשמיעה 1, לשינוי 2, לאלפון אישי 3={MENU_KEY_PARAMS}"
+                "read=t-לשמיעה 1, לשינוי 2, לאלפון אישי 3=val,no,1,1,7,NO,,,,,,,,no"
             )
         elif val == "2":
             user["step"] = "update_voice"
-            return PlainTextResponse(f"read=t-נא לומר את שמך המעודכן וסולמית לסיום={RECORD_PARAMS}")
+            return PlainTextResponse(
+                "read=t-נא לומר את שמך המעודכן וסולמית לסיום=val,no,record,,,no"
+            )
         elif val == "3":
             p_list = [x for x in cache_personal if x["owner"] == caller_phone]
             if not p_list:
                 return PlainTextResponse(
                     "id_list_message=t-האלפון האישי שלך ריק&"
-                    f"read=t-לשמיעה 1, לשינוי 2, לאלפון 3={MENU_KEY_PARAMS}"
+                    "read=t-לשמיעה 1, לשינוי 2, לאלפון 3=val,no,1,1,7,NO,,,,,,,,no"
                 )
             user["search_results"] = p_list
             user["current_index"] = 0
@@ -366,14 +454,16 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             first = p_list[0]
             return PlainTextResponse(
                 f"id_list_message=t-נמצאו {len(p_list)} אנשי קשר&" +
-                get_menu_text(clean_yemot_text(first["name"]), first["phone"], "personal")
+                get_menu_text(clean_yemot_text(first["name"]), normalize_phone(first["phone"]), "personal")
             )
 
     if user["step"] == "update_voice":
         new_name = transcribe_audio(latest_record_path)
         if not new_name:
             user["step"] = "update_voice"
-            return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
+            return PlainTextResponse(
+                "read=t-השם לא נקלט, נא לומר את שמך שוב וסולמית לסיום=val,no,record,,,no"
+            )
 
         for c in cache_contacts:
             if c["phone"] == caller_phone:
@@ -382,45 +472,54 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-שמך עודכן בהצלחה ל {new_name}&"
-            f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}"
+            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
         )
 
-    # 5. שלוחה 3: רישום חדש (כולל השמעת השם ואישור)
+    # ==================== שלוחה 4: רישום חדש ====================
     if user["step"] == "register_voice":
         text = transcribe_audio(latest_record_path)
         if not text:
             user["step"] = "register_voice"
-            return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך וסולמית לסיום={RECORD_PARAMS}")
+            return PlainTextResponse(
+                "read=t-השם לא נקלט, נא לומר את שמך וסולמית לסיום=val,no,record,,,no"
+            )
         
         user["temp_name"] = text
         user["step"] = "confirm_register_name"
-        # השמעת השם שנקלט ואישור לפני המשך להקשת הטלפון
-        return PlainTextResponse(f"read=t-השם שנקלט הוא {text}, לאישור הקישו 1, להקלטה חוזרת 2={MENU_KEY_PARAMS}")
+        return PlainTextResponse(
+            f"read=t-השם שנקלט הוא {text}, לאישור הקישו 1, להקלטה חוזרת 2=val,no,1,1,7,NO,,,,,,,,no"
+        )
 
     if user["step"] == "confirm_register_name":
         if val == "1":
             user["step"] = "register_phone"
-            return PlainTextResponse(f"read=t-נא להקיש את מספר הטלפון וסולמית לסיום={PHONE_KEY_PARAMS}")
+            return PlainTextResponse(
+                f"read=t-נא להקיש את מספר הטלפון עבור {user['temp_name']} וסולמית לסיום=val,no,11,9,10,NO,,,,,,,,no"
+            )
         else:
             user["step"] = "register_voice"
-            return PlainTextResponse(f"read=t-נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
+            return PlainTextResponse(
+                "read=t-נא לומר את שמך שוב וסולמית לסיום=val,no,record,,,no"
+            )
 
     if user["step"] == "register_phone":
-        new_phone = val
+        new_phone = normalize_phone(val)
         new_name = user["temp_name"]
         cache_contacts.append({"name": new_name, "phone": new_phone})
         background_tasks.add_task(post_to_sheets, {"action": "register", "name": new_name, "phone": new_phone})
         user["step"] = "main_menu"
         return PlainTextResponse(
             f"id_list_message=t-נרשמת בהצלחה השם {new_name} מספר {new_phone}&"
-            f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}"
+            "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
         )
 
     # ברירת מחדל
     user["step"] = "main_menu"
-    return PlainTextResponse(f"read=t-לחיפוש בספר הטלפונים הקישו 1, לאזור אישי הקישו 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}")
+    return PlainTextResponse(
+        "read=t-לחיפוש שם 1, לחיפוש מספר 2, לאזור אישי 3, לרישום 4, להודעה 5=val,no,1,1,7,NO,,,,,,,,no"
+    )
 
-# ==================== ביצוע חיפוש חכם ומדורג ====================
+# ==================== ביצוע חיפוש חכם ומדורג לפי שם ====================
 
 def do_search(query: str, user: dict, mode: str = "general"):
     clean_q = normalize_hebrew(query)
@@ -438,7 +537,7 @@ def do_search(query: str, user: dict, mode: str = "general"):
         user["step"] = "menu_search"
         return PlainTextResponse(
             "id_list_message=t-לא נמצאו תוצאות לשם המבוקש&"
-            f"read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2={MENU_KEY_PARAMS}"
+            "read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2=val,no,1,1,7,NO,,,,,,,,no"
         )
 
     user["search_results"] = matches
@@ -447,20 +546,23 @@ def do_search(query: str, user: dict, mode: str = "general"):
     user["step"] = "browse_results"
     first = matches[0]
     first_name = clean_yemot_text(first["name"])
+    first_phone = normalize_phone(first["phone"])
     
     log_info(f"נמצאו {len(matches)} תוצאות דומות עבור '{query}'. התוצאה המובילה: {first_name}")
 
     return PlainTextResponse(
         f"id_list_message=t-נמצאו {len(matches)} תוצאות&" +
-        get_menu_text(first_name, first["phone"], mode)
+        get_menu_text(first_name, first_phone, mode)
     )
 
 def get_menu_text(name: str, phone: str, mode: str = "general"):
+    phone_clean = normalize_phone(phone)
     if mode == "general":
-        t = f"t-תוצאה {name}, טלפון {phone}, לשמיעה חוזרת 0, לתוצאה הבאה 1, לקודמת 2, לחיפוש חדש 3, לחיוג 4, לשמירה באלפון 5, ליציאה 6"
+        t = f"t-תוצאה {name}, טלפון {phone_clean}, לשמיעה חוזרת 0, לתוצאה הבאה 1, לקודמת 2, לחיפוש חדש 3, לחיוג 4, לשמירה באלפון 5, ליציאה 6"
     else:
-        t = f"t-איש קשר {name}, טלפון {phone}, לשמיעה חוזרת 0, לאיש קשר הבא 1, לקודם 2, לחיפוש חדש 3, לחיוג 4, ליציאה 6"
-    return f"read={t}={MENU_KEY_PARAMS}"
+        t = f"t-איש קשר {name}, טלפון {phone_clean}, לשמיעה חוזרת 0, לאיש קשר הבא 1, לקודם 2, לחיפוש חדש 3, לחיוג 4, ליציאה 6"
+    
+    return f"read={t}=val,no,1,1,7,NO,,,,,,,,no"
 
 def play_contact(name: str, phone: str, mode: str = "general"):
     return PlainTextResponse(get_menu_text(name, phone, mode))
