@@ -4,6 +4,7 @@ import re
 import json
 import threading
 import requests
+from difflib import SequenceMatcher
 import speech_recognition as sr
 from pydub import AudioSegment
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -28,6 +29,58 @@ def clean_yemot_text(text: str) -> str:
         return ""
     return text.replace(".", " ").replace("-", " ").strip()
 
+# ==================== אלגוריתם חיפוש מטושטש / שמות דומים ====================
+
+def normalize_hebrew(s: str) -> str:
+    """מנרמל אותיות סופיות לאותיות רגילות ומנקה רווחים"""
+    if not s:
+        return ""
+    trans = str.maketrans({
+        'ך': 'כ',
+        'ם': 'מ',
+        'ן': 'נ',
+        'ף': 'פ',
+        'ץ': 'צ'
+    })
+    cleaned = s.translate(trans)
+    return re.sub(r'[\s\-_]+', ' ', cleaned).strip()
+
+def calculate_similarity(query: str, target: str) -> float:
+    """
+    חישוב ציון דמיון בין 0.0 ל-1.0
+    מתחשב בהכלה, מילים בודדות, והבדלים של אותיות בודדות
+    """
+    q = normalize_hebrew(query)
+    t = normalize_hebrew(target)
+
+    if not q or not t:
+        return 0.0
+
+    # 1. זהות מוחלטת
+    if q == t:
+        return 1.0
+
+    # 2. הכלה מלאה (למשל: חיפוש שם פרטי מתוך שם מלא)
+    if q in t or t in q:
+        return 0.95
+
+    # 3. בדיקת דמיון מילה-מול-מילה (למשל: 'ישראל כהן' מול 'ישראל קוהן')
+    q_words = q.split()
+    t_words = t.split()
+    word_scores = []
+    for qw in q_words:
+        best_match_for_qw = max([SequenceMatcher(None, qw, tw).ratio() for tw in t_words], default=0.0)
+        word_scores.append(best_match_for_qw)
+
+    avg_word_score = sum(word_scores) / len(word_scores) if word_scores else 0.0
+
+    # 4. דמיון כולל של כל המחרוזת
+    full_ratio = SequenceMatcher(None, q, t).ratio()
+
+    return max(full_ratio, avg_word_score)
+
+# ==================== סנכרון Google Sheets ====================
+
 def sync_from_sheets():
     global cache_contacts, cache_personal
     try:
@@ -44,7 +97,6 @@ def sync_from_sheets():
         log_info(f"שגיאה בחיבור ל-Google Sheets: {e}")
 
 def ensure_routing_parent_folder():
-    """מוודא שתיקיית routing הראשית מוגדרת כשלוחה תקינה כדי שימות יוכל לחצות דרכה"""
     try:
         url = "https://www.call2all.co.il/ym/api/UploadFile"
         files = {
@@ -123,21 +175,14 @@ def transcribe_audio(path_or_url: str) -> str:
         log_info(f"Audio recognition error: {e}")
         return ""
 
-# ==================== יצירת שלוחת ניתוביה לפי מספר היעד ====================
+# ==================== ניתוביה וחיוג ====================
 
 def route_via_nitoviya(target_phone: str):
-    """
-    יוצר שלוחה תחת routing ששמה הוא מספר הטלפון אליו מחייגים (למשל: /routing/0521234567)
-    """
-    # 1. ניקוי המספר ליעד (ספרות בלבד)
     clean_target = re.sub(r"\D", "", target_phone)
     if clean_target.startswith("972"):
         clean_target = "0" + clean_target[3:]
 
-    # שלוחה תחת routing עם מספר היעד
     unique_folder = f"routing/{clean_target}"
-
-    # שתי שורות בלבד עם מעברי שורה של ווינדוס (\r\n)
     ini_content = f"type=nitoviya\r\nnitoviya_dial_to={clean_target}\r\n"
 
     try:
@@ -152,14 +197,13 @@ def route_via_nitoviya(target_phone: str):
             'convertAudio': '0'
         }
         res = requests.post(url, params=params, files=files, timeout=10)
-        log_info(f"תשובת ימות המשיח ביצירת שלוחת היעד: {res.text}")
+        log_info(f"תשובת ימות המשיח: {res.text}")
     except Exception as e:
         log_info(f"שגיאה בהגדרת ניתוביה: {e}")
 
-    # העברת המשתמש ישירות לשלוחה
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# תבניות מקשים ללא אישורים כפולים
+# תבניות מקשים
 MENU_KEY_PARAMS = "val,no,1,1,7,NO,,,,,,,,no"
 PHONE_KEY_PARAMS = "val,no,9,11,7,NO,,,,,,,,no"
 HEBREW_KEY_PARAMS = "val,no,1,15,7,HebrewKeyboard,,,,,,,,no"
@@ -279,7 +323,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(f"read=t-לחיפוש קולי 1, להקלדה 2={MENU_KEY_PARAMS}")
         elif val == "4":
-            # ניתוב לשלוחת routing עם מספר הטלפון המבוקש
             return route_via_nitoviya(c_phone)
         elif val == "5":
             if user["mode"] == "general":
@@ -380,20 +423,39 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     user["step"] = "main_menu"
     return PlainTextResponse(f"read=t-לחיפוש בספר הטלפונים הקישו 1, לאזור אישי הקישו 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}")
 
+# ==================== ביצוע חיפוש חכם ומדורג ====================
+
 def do_search(query: str, user: dict, mode: str = "general"):
-    matches = [c for c in cache_contacts if query in c["name"]]
+    clean_q = normalize_hebrew(query)
+    scored_results = []
+
+    # מעבר על כל המאגר וחישוב ציון התאמה לכל איש קשר
+    for c in cache_contacts:
+        score = calculate_similarity(clean_q, c["name"])
+        # סף קליטה: 0.65 תופס החלפת אות בודדת, תעתיק פונטי או שגיאות כתיב
+        if score >= 0.65:
+            scored_results.append((score, c))
+
+    # מיון לפי הציון הגבוה ביותר
+    scored_results.sort(key=lambda x: x[0], reverse=True)
+    matches = [item[1] for item in scored_results]
+
     if not matches:
         user["step"] = "menu_search"
         return PlainTextResponse(
             "id_list_message=t-לא נמצאו תוצאות לשם המבוקש&"
             f"read=t-לחיפוש קולי הקישו 1, להקלדה הקישו 2={MENU_KEY_PARAMS}"
         )
+
     user["search_results"] = matches
     user["current_index"] = 0
     user["mode"] = mode
     user["step"] = "browse_results"
     first = matches[0]
     first_name = clean_yemot_text(first["name"])
+    
+    log_info(f"נמצאו {len(matches)} תוצאות דומות עבור '{query}'. התוצאה המובילה: {first_name}")
+
     return PlainTextResponse(
         f"id_list_message=t-נמצאו {len(matches)} תוצאות&" +
         get_menu_text(first_name, first["phone"], mode)
