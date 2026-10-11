@@ -43,9 +43,27 @@ def sync_from_sheets():
     except Exception as e:
         log_info(f"שגיאה בחיבור ל-Google Sheets: {e}")
 
+def ensure_routing_parent_folder():
+    """מוודא שתיקיית routing הראשית מוגדרת כשלוחה תקינה כדי שימות יוכל לחצות דרכה"""
+    try:
+        url = "https://www.call2all.co.il/ym/api/UploadFile"
+        files = {
+            'file': ('ext.ini', io.BytesIO("type=menu\r\n".encode('utf-8')), 'text/plain')
+        }
+        params = {
+            'token': YEMOT_TOKEN,
+            'path': "ivr2:/routing/ext.ini",
+            'convertAudio': '0'
+        }
+        requests.post(url, params=params, files=files, timeout=10)
+        log_info("תיקיית routing הראשית מאומתת ומוכנה.")
+    except Exception as e:
+        log_info(f"שגיאה בהגדרת תיקיית routing הראשית: {e}")
+
 @app.on_event("startup")
 def startup():
     threading.Thread(target=sync_from_sheets, daemon=True).start()
+    threading.Thread(target=ensure_routing_parent_folder, daemon=True).start()
 
 @app.get("/refresh")
 def manual_refresh():
@@ -105,25 +123,25 @@ def transcribe_audio(path_or_url: str) -> str:
         log_info(f"Audio recognition error: {e}")
         return ""
 
-# ==================== יצירת שלוחת ניתוביה ישירה וחיוג ====================
+# ==================== יצירת שלוחת ניתוביה לפי מספר היעד ====================
 
-def route_via_nitoviya(target_phone: str, caller_phone: str):
+def route_via_nitoviya(target_phone: str):
+    """
+    יוצר שלוחה תחת routing ששמה הוא מספר הטלפון אליו מחייגים (למשל: /routing/0521234567)
+    """
     # 1. ניקוי המספר ליעד (ספרות בלבד)
     clean_target = re.sub(r"\D", "", target_phone)
     if clean_target.startswith("972"):
         clean_target = "0" + clean_target[3:]
 
-    # 2. שלוחה ישירה ברמה הראשית לפי מספר המתקשר (למשל: /0531234567)
-    clean_caller = re.sub(r"\D", "", caller_phone)
-    if not clean_caller:
-        clean_caller = "9999"
-    unique_folder = clean_caller
+    # שלוחה תחת routing עם מספר היעד
+    unique_folder = f"routing/{clean_target}"
 
-    # 3. בדיוק שתי השורות שדורש מודול ניתוביה עם ירידת שורה של ווינדוס (\r\n)
+    # שתי שורות בלבד עם מעברי שורה של ווינדוס (\r\n)
     ini_content = f"type=nitoviya\r\nnitoviya_dial_to={clean_target}\r\n"
 
     try:
-        log_info(f"יוצר שלוחת ניתוביה ישירה /{unique_folder} עבור היעד {clean_target}...")
+        log_info(f"מגדיר ניתוביה בשלוחה /{unique_folder} עבור היעד {clean_target}...")
         url = "https://www.call2all.co.il/ym/api/UploadFile"
         files = {
             'file': ('ext.ini', io.BytesIO(ini_content.encode('utf-8')), 'text/plain')
@@ -134,11 +152,11 @@ def route_via_nitoviya(target_phone: str, caller_phone: str):
             'convertAudio': '0'
         }
         res = requests.post(url, params=params, files=files, timeout=10)
-        log_info(f"תשובת ימות המשיח ביצירת שלוחה: {res.text}")
+        log_info(f"תשובת ימות המשיח ביצירת שלוחת היעד: {res.text}")
     except Exception as e:
-        log_info(f"שגיאה ביצירת שלוחת ניתוביה: {e}")
+        log_info(f"שגיאה בהגדרת ניתוביה: {e}")
 
-    # העברת המשתמש ישירות לשלוחה שנוצרה
+    # העברת המשתמש ישירות לשלוחה
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
 # תבניות מקשים ללא אישורים כפולים
@@ -261,8 +279,8 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             user["step"] = "menu_search"
             return PlainTextResponse(f"read=t-לחיפוש קולי 1, להקלדה 2={MENU_KEY_PARAMS}")
         elif val == "4":
-            # ניתוב ישיר דרך שלוחת nitoviya שנפתחת בשורש
-            return route_via_nitoviya(c_phone, caller_phone)
+            # ניתוב לשלוחת routing עם מספר הטלפון המבוקש
+            return route_via_nitoviya(c_phone)
         elif val == "5":
             if user["mode"] == "general":
                 cache_personal.append({"owner": caller_phone, "name": c_name, "phone": c_phone})
