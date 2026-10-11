@@ -201,11 +201,18 @@ def route_via_nitoviya(target_phone: str):
 
     return PlainTextResponse(f"go_to_folder=/{unique_folder}")
 
-# תבניות מקשים
+# ==================== הגדרות שורה אחת לפי התיעוד הרשמי ====================
+# הקשת תפריט (ערך 1:שם, 2:no, 3:מקסימום 1, 4:מינימום 1, 5:זמן 7, 6:NO, 15:no ללא אישור)
 MENU_KEY_PARAMS = "val,no,1,1,7,NO,,,,,,,,no"
-PHONE_KEY_PARAMS = "val,no,9,11,7,NO,,,,,,,,no"
-HEBREW_KEY_PARAMS = "val,no,1,15,7,HebrewKeyboard,,,,,,,,no"
-RECORD_PARAMS = "val,,record,,,no"
+
+# הקשת טלפון (ערך 3:מקסימום 11, ערך 4:מינימום 9, ערך 5:זמן 7, ערך 6:NO, 15:no ללא אישור)
+PHONE_KEY_PARAMS = "val,no,11,9,7,NO,,,,,,,,no"
+
+# מקלדת עברית (ערך 3:מקסימום 15, ערך 4:מינימום 1, ערך 5:זמן 7, ערך 6:HebrewKeyboard, 15:no ללא אישור)
+HEBREW_KEY_PARAMS = "val,no,15,1,7,HebrewKeyboard,,,,,,,,no"
+
+# הקלטה לפי עמוד 11 (ערך 1:שם, 2:no, 3:record, 4:ריק, 5:ריק, 6:no לסיום מידי ללא תפריט)
+RECORD_PARAMS = "val,no,record,,,no"
 
 # ==================== ניתוב שיחה ראשי ====================
 
@@ -214,7 +221,6 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return PlainTextResponse("ok")
 
-    # שליפת כל הערכים תוך טיפול בצבירת val של ימות המשיח
     if request.method == "POST":
         try:
             form = await request.form()
@@ -227,17 +233,14 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
         val_list = [v.strip() for v in request.query_params.getlist("val") if str(v).strip()]
         params = dict(request.query_params)
 
-    # הערך האחרון שנשלח על ידי המשתמש
     val = val_list[-1] if val_list else ""
-    
-    # איתור מדויק של קובץ הקלטה אם נשלח (מסתיים ב-.wav)
     wav_files = [v for v in val_list if v.endswith(".wav")]
     latest_record_path = wav_files[-1] if wav_files else val
 
     caller_phone = params.get("ApiPhone", "000")
     hangup = params.get("hangup", "")
 
-    log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערכים שהתקבלו: {val_list} | ערך נבחר: '{val}' | קובץ שמע: '{latest_record_path}'")
+    log_info(f"פנייה נכנסת | טלפון: {caller_phone} | ערכים: {val_list} | ערך נבחר: '{val}' | קובץ שמע: '{latest_record_path}'")
 
     if hangup == "yes":
         if caller_phone in user_states:
@@ -382,7 +385,7 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             f"read=t-לחיפוש הקישו 1, לאזור אישי 2, לרישום 3, להודעה 4={MENU_KEY_PARAMS}"
         )
 
-    # 5. שלוחה 3: רישום חדש
+    # 5. שלוחה 3: רישום חדש (כולל השמעת השם ואישור)
     if user["step"] == "register_voice":
         text = transcribe_audio(latest_record_path)
         if not text:
@@ -390,8 +393,17 @@ async def handle_ivr(request: Request, background_tasks: BackgroundTasks):
             return PlainTextResponse(f"read=t-השם לא נקלט, נא לומר את שמך וסולמית לסיום={RECORD_PARAMS}")
         
         user["temp_name"] = text
-        user["step"] = "register_phone"
-        return PlainTextResponse(f"read=t-נא להקיש את מספר הטלפון עבור {text} וסולמית לסיום={PHONE_KEY_PARAMS}")
+        user["step"] = "confirm_register_name"
+        # השמעת השם שנקלט ואישור לפני המשך להקשת הטלפון
+        return PlainTextResponse(f"read=t-השם שנקלט הוא {text}, לאישור הקישו 1, להקלטה חוזרת 2={MENU_KEY_PARAMS}")
+
+    if user["step"] == "confirm_register_name":
+        if val == "1":
+            user["step"] = "register_phone"
+            return PlainTextResponse(f"read=t-נא להקיש את מספר הטלפון וסולמית לסיום={PHONE_KEY_PARAMS}")
+        else:
+            user["step"] = "register_voice"
+            return PlainTextResponse(f"read=t-נא לומר את שמך שוב וסולמית לסיום={RECORD_PARAMS}")
 
     if user["step"] == "register_phone":
         new_phone = val
